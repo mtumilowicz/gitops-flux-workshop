@@ -261,8 +261,10 @@ flux bootstrap github \
 
 ## `GitRepository` and source artifacts
 
-[`clusters/source.yaml`](./clusters/source.yaml) defines one source for both
-environments:
+* definition
+  * [`clusters/source.yaml`](./clusters/source.yaml) defines one source for both
+    environments
+* configuration
 
 ```yaml
 apiVersion: source.toolkit.fluxcd.io/v1
@@ -277,31 +279,38 @@ spec:
     branch: main
 ```
 
-Every field used:
-
-* `apiVersion` selects the stable Source API
-* `kind` selects the `GitRepository` resource
-* `metadata.name` identifies the source
-* `metadata.namespace` determines its namespace and reference scope
-* `spec.interval` schedules Git checks
-* `spec.url` identifies the remote repository
-* `spec.ref.branch` resolves the tip of `main`
-
-For a successful reconciliation, `source-controller`:
-
-1. resolves the configured reference to a commit
-2. applies default exclusions and `.sourceignore`
-3. archives the remaining content
-4. publishes the artifact inside the cluster
-5. reports revision, digest, size and URL in `.status.artifact`
-
-The revision identifies the Git input. The digest identifies the produced
-artifact content. They are different because files may be excluded.
+* fields
+  * `apiVersion`
+    * selects the stable Source API
+  * `kind`
+    * selects the `GitRepository` resource
+  * `metadata.name`
+    * identifies the source
+  * `metadata.namespace`
+    * determines its namespace and reference scope
+  * `spec.interval`
+    * schedules Git checks
+  * `spec.url`
+    * identifies the remote repository
+  * `spec.ref.branch`
+    * resolves the tip of `main`
+* successful `source-controller` reconciliation
+  1. resolves the configured reference to a commit
+  2. applies default exclusions and `.sourceignore`
+  3. archives the remaining content
+  4. publishes the artifact inside the cluster
+  5. reports revision, digest, size and URL in `.status.artifact`
+* artifact identity
+  * the revision identifies the Git input
+  * the digest identifies the produced artifact content
+  * they are different because files may be excluded
 
 ## Flux `Kustomization`
 
-[`clusters/dev/nginx.yaml`](./clusters/dev/nginx.yaml) defines the dev
-reconciliation pipeline:
+* definition
+  * [`clusters/dev/nginx.yaml`](./clusters/dev/nginx.yaml) defines the dev
+    reconciliation pipeline
+* configuration
 
 ```yaml
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -327,30 +336,48 @@ spec:
       name: sops-age
 ```
 
-Every field used:
-
-* `apiVersion` selects the stable Flux Kustomize API
-* `kind` selects the Flux `Kustomization` resource
-* `metadata.name` identifies this pipeline
-* `metadata.namespace` places it in `flux-system`
-* `spec.interval` schedules successful reconciliation approximately every minute
-* `spec.retryInterval` retries failures after 20 seconds
-* `spec.timeout` limits build, apply and health-check operations to two minutes
-* `spec.path` selects a directory in the source artifact
-* `spec.prune` enables deletion of objects removed from desired state
-* `spec.wait` checks all reconciled resources for readiness
-* `spec.sourceRef.kind` selects the source type
-* `spec.sourceRef.name` selects `GitRepository/gitops-flux-workshop`
-* `spec.dependsOn[].name` waits for `dev-namespaces` to be ready
-* `spec.decryption.provider` enables SOPS
-* `spec.decryption.secretRef.name` selects `Secret/sops-age`
-
-`sourceRef.namespace` is omitted. Flux therefore looks for the source in the
-Flux `Kustomization` namespace, `flux-system`.
+* fields
+  * `apiVersion`
+    * selects the stable Flux Kustomize API
+  * `kind`
+    * selects the Flux `Kustomization` resource
+  * `metadata.name`
+    * identifies this pipeline
+  * `metadata.namespace`
+    * places it in `flux-system`
+  * `spec.interval`
+    * schedules successful reconciliation approximately every minute
+  * `spec.retryInterval`
+    * retries failures after 20 seconds
+  * `spec.timeout`
+    * limits build, apply and health-check operations to two minutes
+  * `spec.path`
+    * selects a directory in the source artifact
+  * `spec.prune`
+    * enables deletion of objects removed from desired state
+  * `spec.wait`
+    * checks all reconciled resources for readiness
+  * `spec.sourceRef.kind`
+    * selects the source type
+  * `spec.sourceRef.name`
+    * selects `GitRepository/gitops-flux-workshop`
+  * `spec.dependsOn[].name`
+    * waits for `dev-namespaces` to be ready
+  * `spec.decryption.provider`
+    * enables SOPS
+  * `spec.decryption.secretRef.name`
+    * selects `Secret/sops-age`
+* source namespace
+  * `sourceRef.namespace` is omitted
+  * Flux therefore looks for the source in the Flux `Kustomization` namespace,
+    `flux-system`
 
 ### Artifact-relative path
 
-`spec.path` starts at the artifact root, not beside `clusters/dev/nginx.yaml`:
+* rule
+  * `spec.path` starts at the artifact root
+  * it does not start beside `clusters/dev/nginx.yaml`
+* artifact path
 
 ```text
 GitRepository artifact
@@ -358,19 +385,25 @@ GitRepository artifact
     └── kustomization.yaml
 ```
 
-`./apps/nginx/overlays/dev` is valid. `./overlays/dev` is not.
+* result
+  * `./apps/nginx/overlays/dev` is valid
+  * `./overlays/dev` is not
 
 ### Flux `Kustomization` versus Kustomize
 
-| Flux `Kustomization` | Kustomize `kustomization.yaml` |
-| --- | --- |
-| Kubernetes custom resource | Kustomize build instructions |
-| read by `kustomize-controller` | read by Kustomize |
-| selects a source artifact and path | selects resources, generators and patches |
-| reconciles continuously | renders once per invocation |
-| supports readiness, retry, dependency, decryption and pruning | does not manage runtime state |
-
-The relationship is:
+* Flux `Kustomization`
+  * Kubernetes custom resource
+  * read by `kustomize-controller`
+  * selects a source artifact and path
+  * reconciles continuously
+  * supports readiness, retry, dependency, decryption and pruning
+* Kustomize `kustomization.yaml`
+  * Kustomize build instructions
+  * read by Kustomize
+  * selects resources, generators and patches
+  * renders once per invocation
+  * does not manage runtime state
+* relationship
 
 ```text
 clusters/dev/nginx.yaml
@@ -382,11 +415,11 @@ clusters/dev/nginx.yaml
 
 ### How the dev overlay is built
 
-Kustomize does not automatically load every YAML file in a directory. A
-`resources` list explicitly defines the files and Kustomize directories that
-participate in the build.
-
-The dev overlay starts with:
+* resource discovery
+  * Kustomize does not automatically load every YAML file in a directory
+  * a `resources` list explicitly defines the files and Kustomize directories
+    that participate in the build
+* dev overlay resources
 
 ```yaml
 resources:
@@ -395,35 +428,35 @@ resources:
   - secret.enc.yaml
 ```
 
-The process is:
+* build process
+  1. Kustomize follows `../../base` and opens
+     `apps/nginx/base/kustomization.yaml`.
+  2. The base registers `deployment.yaml` and `service.yaml` under `resources`.
+  3. Kustomize loads the objects declared in those files:
+     `Deployment/nginx` and `Service/nginx`.
+  4. Kustomize returns to the dev overlay and loads `ConfigMap/nginx-index` and
+     `Secret/nginx-workshop-secret`.
+  5. The overlay registers `deployment-patch.yaml` under `patches`.
+  6. Kustomize reads the patch identity:
 
-1. Kustomize follows `../../base` and opens
-   `apps/nginx/base/kustomization.yaml`.
-2. The base registers `deployment.yaml` and `service.yaml` under `resources`.
-3. Kustomize loads the objects declared in those files:
-   `Deployment/nginx` and `Service/nginx`.
-4. Kustomize returns to the dev overlay and loads `ConfigMap/nginx-index` and
-   `Secret/nginx-workshop-secret`.
-5. The overlay registers `deployment-patch.yaml` under `patches`.
-6. Kustomize reads the patch identity:
+     ```yaml
+     apiVersion: apps/v1
+     kind: Deployment
+     metadata:
+       name: nginx
+     ```
 
-   ```yaml
-   apiVersion: apps/v1
-   kind: Deployment
-   metadata:
-     name: nginx
-   ```
-
-7. Kustomize finds the loaded resource with the same API version, kind and
-   name: `apps/v1 Deployment/nginx`.
-8. It merges `spec.replicas: 1` into that Deployment. Other Deployments are not
-   selected.
-9. It assigns `nginx-dev` to namespaced resources and renders the final YAML.
-
-Filenames do not identify Kubernetes resources. `deployment.yaml` and
-`deployment-patch.yaml` could be renamed if their `kustomization.yaml`
-references were updated. Patch matching comes from `apiVersion`, `kind` and
-`metadata.name` inside the YAML.
+  7. Kustomize finds the loaded resource with the same API version, kind and
+     name: `apps/v1 Deployment/nginx`.
+  8. It merges `spec.replicas: 1` into that Deployment. Other Deployments are not
+     selected.
+  9. It assigns `nginx-dev` to namespaced resources and renders the final YAML.
+* resource identity
+  * filenames do not identify Kubernetes resources
+  * `deployment.yaml` and `deployment-patch.yaml` could be renamed if their
+    `kustomization.yaml` references were updated
+  * patch matching comes from `apiVersion`, `kind` and `metadata.name` inside
+    the YAML
 
 ## Reconciliation behavior
 
@@ -451,32 +484,37 @@ references were updated. Patch matching comes from `apiVersion`, `kind` and
   * with `prune: true`, an owned object removed from desired state is deleted
   * deleting the Flux `Kustomization` also deletes its inventory by default
   * one pipeline does not prune another pipeline's inventory
-
-The namespace and workload pipelines are separate. Pruning `dev-nginx` does not
-remove `nginx-dev`, which belongs to `dev-namespaces`.
+* pipeline ownership
+  * the namespace and workload pipelines are separate
+  * pruning `dev-nginx` does not remove `nginx-dev`, which belongs to
+    `dev-namespaces`
 
 ## SOPS decryption
 
-Flux receives the encrypted files through the source artifact. At
-reconciliation time, `kustomize-controller`:
-
-1. reads `decryption.secretRef.name`
-2. loads `identity.agekey` from `Secret/sops-age` in `flux-system`
-3. decrypts the encrypted values in memory
-4. builds and applies a normal Kubernetes Secret
-
-`.sops.yaml` supplies the public recipient when the local SOPS CLI creates or
-updates a file. Flux does not use it to decrypt an existing file. Decryption
-uses the encrypted file metadata and the private identity in the Kubernetes
-Secret.
-
-SOPS protects secret values stored in Git. It does not authorize a deployment,
-protect plaintext already stored in Kubernetes or prove that a Git change is
-safe.
+* input
+  * Flux receives the encrypted files through the source artifact
+* reconciliation-time process
+  1. `kustomize-controller` reads `decryption.secretRef.name`
+  2. it loads `identity.agekey` from `Secret/sops-age` in `flux-system`
+  3. it decrypts the encrypted values in memory
+  4. it builds and applies a normal Kubernetes Secret
+* `.sops.yaml`
+  * supplies the public recipient when the local SOPS CLI creates or updates a
+    file
+  * Flux does not use it to decrypt an existing file
+  * decryption uses the encrypted file metadata and the private identity in the
+    Kubernetes Secret
+* protection boundary
+  * SOPS protects secret values stored in Git
+  * it does not authorize a deployment
+  * it does not protect plaintext already stored in Kubernetes
+  * it does not prove that a Git change is safe
 
 ## Helm, image automation and notifications
 
 ### HelmRelease
+
+* flow
 
 ```text
 HelmRepository or GitRepository
@@ -485,15 +523,20 @@ HelmRepository or GitRepository
   → Helm install, upgrade, test, remediation or uninstall
 ```
 
-`helm-controller` watches `HelmRelease`, creates or references the required
-`HelmChart`, obtains the artifact from `source-controller` and performs Helm
-release operations. A Flux `Kustomization` can apply a `HelmRelease` and wait
-for it to become ready.
-
-The workshop uses Kubernetes manifests because its purpose is to expose the
-`GitRepository` to Kustomize reconciliation path.
+* behavior
+  * `helm-controller` watches `HelmRelease`
+  * creates or references the required `HelmChart`
+  * obtains the artifact from `source-controller`
+  * performs Helm release operations
+  * a Flux `Kustomization` can apply a `HelmRelease` and wait for it to become
+    ready
+* workshop selection
+  * uses Kubernetes manifests
+  * exposes the `GitRepository` to Kustomize reconciliation path
 
 ### Image automation
+
+* flow
 
 ```text
 ImageRepository → ImagePolicy → ImageUpdateAutomation → Git commit
@@ -501,72 +544,101 @@ ImageRepository → ImagePolicy → ImageUpdateAutomation → Git commit
                                               normal Flux reconciliation
 ```
 
-`image-reflector-controller` scans a registry and evaluates the policy.
-`image-automation-controller` updates marked YAML fields and commits the change
-to Git. It does not patch the Deployment directly.
-
-Image automation requires the optional controllers, registry access and
-narrowly scoped Git write credentials. Those dependencies are outside this
-workshop.
+* behavior
+  * `image-reflector-controller` scans a registry and evaluates the policy
+  * `image-automation-controller` updates marked YAML fields and commits the
+    change to Git
+  * it does not patch the Deployment directly
+* requirements
+  * optional controllers
+  * registry access
+  * narrowly scoped Git write credentials
+* scope
+  * these dependencies are outside this workshop
 
 ### Notifications
 
-Inbound flow:
+* inbound flow
 
 ```text
 Git provider webhook → Receiver → requested source reconciliation
 ```
 
-Outbound flow:
+* outbound flow
 
 ```text
 Flux event → Alert filter → Provider → Slack, Teams, webhook or another service
 ```
 
-No notification objects are included because a runnable example requires an
-external endpoint, credentials and, for inbound webhooks, network exposure.
-Kubernetes events and controller logs remain available locally.
+* workshop scope
+  * no notification objects are included
+  * a runnable example requires an external endpoint and credentials
+  * inbound webhooks also require network exposure
+* local observability
+  * Kubernetes events and controller logs remain available locally
 
 ## Flux versus Argo CD
 
-Both implement pull-based continuous delivery for Kubernetes. Their operating
-models differ.
-
-| Area | Flux | Argo CD |
-| --- | --- | --- |
-| Primary abstraction | sources plus specialized reconciliation resources | `Application`, `ApplicationSet` and `AppProject` |
-| Architecture | composable Kubernetes controllers | application controller, repository server, API server and integrated UI |
-| Built-in interface | Kubernetes API and Flux CLI | Kubernetes API, Argo CD API, CLI and web UI |
-| Installation lifecycle | bootstrap can make Flux manage itself from Git | installation followed by declarative application configuration |
-| Multi-cluster style | commonly installed per cluster; remote reconciliation is also supported | commonly centralizes registered clusters in one control plane |
-| Kustomize | reconciled by `kustomize-controller` | rendered by the repository server for an `Application` |
-| Helm | `HelmRelease` manages Helm release operations | Helm renders manifests; Argo CD manages application lifecycle |
-| SOPS | native decryption in `kustomize-controller` | normally requires a plugin or separate secret solution |
-| Image updates | official optional Flux image controllers write to Git | normally uses the separate Argo CD Image Updater or another tool |
-| Notifications | `Receiver`, `Alert` and `Provider` APIs | integrated Argo CD Notifications |
-| Tenancy | Kubernetes RBAC, namespaces and service-account impersonation | Argo CD RBAC and `AppProject` source, destination and resource restrictions |
-| Visual operations | no built-in Flux web UI | built-in application topology, health, diff and synchronization UI |
-
-Choose Flux when:
-
-* Kubernetes-native APIs and controller composition are preferred
-* GitOps bootstrap and self-management are important
-* native SOPS decryption is required
-* image selection and Git write-back should use official Flux controllers
-* teams prefer Kubernetes RBAC and CLI-driven operation
-* explicit dependencies between reconciliation pipelines are useful
-
-Choose Argo CD when:
-
-* a central application inventory and web interface are primary requirements
-* operators need visual health, diffs, history and synchronization controls
-* `ApplicationSet` should generate applications across clusters or repositories
-* `AppProject` is a good fit for application-level tenancy and policy
-* a central control plane managing registered clusters matches the operating model
-
-Neither is universally better. Decide using the required interface, cluster
-topology, tenancy boundary, secret workflow, Helm semantics, Git write-back and
-the team's operational experience.
+* shared concepts
+  * both implement pull-based continuous delivery for Kubernetes
+  * for Argo CD concepts already covered by its workshop, see
+    [Argo CD](https://github.com/mtumilowicz/argoCD-workshop#argocd)
+* operating models
+  * differ between Flux and Argo CD
+* primary abstraction
+  * Flux: sources plus specialized reconciliation resources
+  * Argo CD: `Application`, `ApplicationSet` and `AppProject`
+* architecture
+  * Flux: composable Kubernetes controllers
+  * Argo CD: application controller, repository server, API server and integrated UI
+* built-in interface
+  * Flux: Kubernetes API and Flux CLI
+  * Argo CD: Kubernetes API, Argo CD API, CLI and web UI
+* installation lifecycle
+  * Flux: bootstrap can make Flux manage itself from Git
+  * Argo CD: installation followed by declarative application configuration
+* multi-cluster style
+  * Flux: commonly installed per cluster; remote reconciliation is also supported
+  * Argo CD: commonly centralizes registered clusters in one control plane
+* Kustomize
+  * Flux: reconciled by `kustomize-controller`
+  * Argo CD: rendered by the repository server for an `Application`
+* Helm
+  * Flux: `HelmRelease` manages Helm release operations
+  * Argo CD: Helm renders manifests; Argo CD manages application lifecycle
+* SOPS
+  * Flux: native decryption in `kustomize-controller`
+  * Argo CD: normally requires a plugin or separate secret solution
+* image updates
+  * Flux: official optional Flux image controllers write to Git
+  * Argo CD: normally uses the separate Argo CD Image Updater or another tool
+* notifications
+  * Flux: `Receiver`, `Alert` and `Provider` APIs
+  * Argo CD: integrated Argo CD Notifications
+* tenancy
+  * Flux: Kubernetes RBAC, namespaces and service-account impersonation
+  * Argo CD: Argo CD RBAC and `AppProject` source, destination and resource
+    restrictions
+* visual operations
+  * Flux: no built-in Flux web UI
+  * Argo CD: built-in application topology, health, diff and synchronization UI
+* choose Flux when
+  * Kubernetes-native APIs and controller composition are preferred
+  * GitOps bootstrap and self-management are important
+  * native SOPS decryption is required
+  * image selection and Git write-back should use official Flux controllers
+  * teams prefer Kubernetes RBAC and CLI-driven operation
+  * explicit dependencies between reconciliation pipelines are useful
+* choose Argo CD when
+  * a central application inventory and web interface are primary requirements
+  * operators need visual health, diffs, history and synchronization controls
+  * `ApplicationSet` should generate applications across clusters or repositories
+  * `AppProject` is a good fit for application-level tenancy and policy
+  * a central control plane managing registered clusters matches the operating model
+* decision
+  * neither is universally better
+  * consider the required interface, cluster topology, tenancy boundary, secret
+    workflow, Helm semantics, Git write-back and the team's operational experience
 
 ## Security
 
@@ -592,8 +664,12 @@ the team's operational experience.
 
 ## Exercises
 
-Prerequisites: Docker Desktop Kubernetes, `kubectl`, Flux CLI, SOPS and this
-repository committed to a reachable `main` branch.
+* prerequisites
+  * Docker Desktop Kubernetes
+  * `kubectl`
+  * Flux CLI
+  * SOPS
+  * this repository committed to a reachable `main` branch
 
 ### 1. Verify prerequisites
 
@@ -602,7 +678,9 @@ kubectl config current-context
 flux check --pre
 ```
 
-Expected: context `docker-desktop` and `prerequisites checks passed`.
+* expected
+  * context `docker-desktop`
+  * `prerequisites checks passed`
 
 ### 2. Install Flux
 
@@ -614,7 +692,8 @@ kubectl -n flux-system wait deployment --all \
 kubectl -n flux-system get deployments
 ```
 
-Expected: the four default controllers are available in `flux-system`.
+* expected
+  * the four default controllers are available in `flux-system`
 
 ### 3. Provide the age identity
 
@@ -623,28 +702,34 @@ kubectl apply -k local-setup
 kubectl -n flux-system get secret sops-age
 ```
 
-Expected: `Secret/sops-age` is `Opaque` and contains one data entry.
+* expected
+  * `Secret/sops-age` is `Opaque`
+  * contains one data entry
 
 ### 4. Connect the source
 
-When using a fork, change `spec.url` in `clusters/source.yaml`, commit and push
-before continuing.
+* when using a fork
+  * change `spec.url` in `clusters/source.yaml`
+  * commit and push before continuing
 
 ```bash
 kubectl apply -k clusters
 flux reconcile source git gitops-flux-workshop
 ```
 
-Expected: status contains `stored artifact for revision 'main@sha1:<commit>'`.
-
-Inspect the artifact:
+* expected
+  * status contains `stored artifact for revision 'main@sha1:<commit>'`
+* inspect the artifact
 
 ```bash
 kubectl -n flux-system get gitrepository gitops-flux-workshop \
   -o jsonpath='{.status.artifact.revision}{"\n"}{.status.artifact.digest}{"\n"}{.status.artifact.url}{"\n"}'
 ```
 
-Expected: a `main@sha1:` revision, `sha256:` digest and internal artifact URL.
+* expected
+  * a `main@sha1:` revision
+  * a `sha256:` digest
+  * an internal artifact URL
 
 ### 5. Reconcile dev and prod
 
@@ -656,16 +741,18 @@ flux reconcile kustomization prod-nginx
 flux get kustomizations
 ```
 
-Expected: all four resources report `Ready=True` at the selected revision.
-
-Verify the replica counts:
+* expected
+  * all four resources report `Ready=True` at the selected revision
+* verify the replica counts
 
 ```bash
 kubectl -n nginx-dev get deployment nginx
 kubectl -n nginx-prod get deployment nginx
 ```
 
-Expected: dev reports `1/1`; prod reports `2/2`.
+* expected
+  * dev reports `1/1`
+  * prod reports `2/2`
 
 ### 6. Read both pages
 
@@ -673,14 +760,18 @@ Expected: dev reports `1/1`; prod reports `2/2`.
 kubectl -n nginx-dev port-forward service/nginx 8080:80
 ```
 
-From another terminal:
+* from another terminal
 
 ```bash
 curl --silent http://localhost:8080
 ```
 
-Expected: `environment: dev`. Stop it and repeat with `-n nginx-prod`;
-expected: `environment: prod`.
+* expected
+  * `environment: dev`
+* prod
+  * stop the dev port-forward
+  * repeat with `-n nginx-prod`
+  * expected: `environment: prod`
 
 ### 7. Verify Flux decryption
 
@@ -690,12 +781,15 @@ kubectl -n nginx-dev get secret nginx-workshop-secret \
 echo
 ```
 
-Expected: `dev`. Git contains ciphertext; Kubernetes contains the Secret
-produced after in-memory decryption.
+* expected
+  * `dev`
+  * Git contains ciphertext
+  * Kubernetes contains the Secret produced after in-memory decryption
 
 ### 8. Observe a Git change
 
-This exercise requires a writable remote configured in `clusters/source.yaml`.
+* prerequisite
+  * a writable remote configured in `clusters/source.yaml`
 
 ```bash
 perl -pi -e 's/environment: dev/environment: dev-updated/' \
@@ -707,7 +801,8 @@ flux reconcile source git gitops-flux-workshop
 flux reconcile kustomization dev-nginx
 ```
 
-With the dev port-forward running, allow for projected ConfigMap propagation:
+* with the dev port-forward running
+  * allow for projected ConfigMap propagation
 
 ```bash
 until curl --silent http://localhost:8080 | grep -q 'environment: dev-updated'; do
@@ -715,7 +810,7 @@ until curl --silent http://localhost:8080 | grep -q 'environment: dev-updated'; 
 done
 ```
 
-Restore the original Git state:
+* restore the original Git state
 
 ```bash
 git revert --no-edit HEAD
@@ -733,7 +828,9 @@ flux reconcile kustomization dev-nginx
 kubectl -n nginx-dev get deployment nginx
 ```
 
-Expected: the desired count changes to four, then returns to the Git value one.
+* expected
+  * the desired count changes to four
+  * it then returns to the Git value one
 
 ### 10. Observe failure, retry and dependency blocking
 
@@ -744,7 +841,9 @@ kubectl -n flux-system patch kustomization dev-namespaces \
 flux reconcile kustomization dev-namespaces
 ```
 
-The command fails. Observe the 20-second retries:
+* expected failure
+  * the command fails
+* observe the 20-second retries
 
 ```bash
 kubectl -n flux-system get kustomization dev-namespaces --watch
@@ -755,10 +854,10 @@ flux events --for Kustomization/dev-namespaces
 flux reconcile kustomization dev-nginx
 ```
 
-Expected: `dev-namespaces` is `Ready=False`; `dev-nginx` reports that its
-dependency is not ready.
-
-Restore the committed object:
+* expected
+  * `dev-namespaces` is `Ready=False`
+  * `dev-nginx` reports that its dependency is not ready
+* restore the committed object
 
 ```bash
 kubectl apply -f clusters/dev/namespaces.yaml
@@ -766,12 +865,15 @@ flux reconcile kustomization dev-namespaces
 flux reconcile kustomization dev-nginx
 ```
 
-Expected: both dev pipelines return to `Ready=True`.
+* expected
+  * both dev pipelines return to `Ready=True`
 
 ### 11. Observe pruning from Git
 
-Remove `secret.enc.yaml` from the `resources` list in
-`apps/nginx/overlays/dev/kustomization.yaml`, then commit and push:
+* change
+  * remove `secret.enc.yaml` from the `resources` list in
+    `apps/nginx/overlays/dev/kustomization.yaml`
+  * commit and push
 
 ```bash
 git add apps/nginx/overlays/dev/kustomization.yaml
@@ -782,9 +884,10 @@ flux reconcile kustomization dev-nginx
 kubectl -n nginx-dev get secret nginx-workshop-secret
 ```
 
-Expected: Kubernetes reports `NotFound`; pruning removed the owned Secret.
-
-Restore it through Git:
+* expected
+  * Kubernetes reports `NotFound`
+  * pruning removed the owned Secret
+* restore it through Git
 
 ```bash
 git revert --no-edit HEAD
@@ -794,11 +897,12 @@ flux reconcile kustomization dev-nginx
 kubectl -n nginx-dev get secret nginx-workshop-secret
 ```
 
-Expected: the Secret exists again.
+* expected
+  * the Secret exists again
 
 ## Troubleshooting
 
-Follow the failed stage from source to workload:
+* follow the failed stage from source to workload
 
 ```bash
 flux check
@@ -812,19 +916,25 @@ kubectl -n nginx-dev get pods
 kubectl -n nginx-dev describe deployment nginx
 ```
 
-| Symptom | Check |
-| --- | --- |
-| source not ready | URL, branch, credentials, network and source conditions |
-| old revision | pushed branch, artifact revision and source reconciliation |
-| build failure | artifact-relative `spec.path` and selected Kustomize file |
-| dependency failure | dependency name and `Ready` condition |
-| readiness timeout | Pods, events, image pull and probes |
-| SOPS failure | `sops-age`, `identity.agekey`, recipient and MAC |
-| persistent drift | suspension, source revision and field ownership |
-| unexpected deletion | pruning configuration and object inventory |
-
-Status conditions and object-scoped events normally contain the first
-actionable error.
+* source not ready
+  * check URL, branch, credentials, network and source conditions
+* old revision
+  * check pushed branch, artifact revision and source reconciliation
+* build failure
+  * check artifact-relative `spec.path` and selected Kustomize file
+* dependency failure
+  * check dependency name and `Ready` condition
+* readiness timeout
+  * check Pods, events, image pull and probes
+* SOPS failure
+  * check `sops-age`, `identity.agekey`, recipient and MAC
+* persistent drift
+  * check suspension, source revision and field ownership
+* unexpected deletion
+  * check pruning configuration and object inventory
+* error location
+  * status conditions and object-scoped events normally contain the first
+    actionable error
 
 ## Cleanup
 
@@ -835,13 +945,15 @@ kubectl wait namespace/nginx-prod --for=delete --timeout=2m
 kubectl delete -k local-setup
 ```
 
-Expected: the workshop source, reconciliation objects, namespaces and age
-identity are removed. Flux remains installed.
-
-On a dedicated disposable cluster only:
+* expected
+  * the workshop source, reconciliation objects, namespaces and age identity
+    are removed
+  * Flux remains installed
+* dedicated disposable cluster only
 
 ```bash
 flux uninstall --namespace=flux-system
 ```
 
-Do not uninstall Flux from a cluster where it manages other workloads.
+* restriction
+  * do not uninstall Flux from a cluster where it manages other workloads
