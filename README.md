@@ -36,8 +36,8 @@
   * each overlay provides its page through a `ConfigMap`
   * there is no application project or image build
 * prerequisite knowledge
-  * Kustomize bases, overlays and patches from `kustomize-workshop`
-  * SOPS recipients, identities and encrypted YAML from `sops-age-key-workshop`
+  * Kustomize bases, overlays and patches from: https://github.com/mtumilowicz/kustomize-workshop
+  * SOPS recipients, identities and encrypted YAML from: https://github.com/mtumilowicz/sops-age-key-workshop
 * scope
   * covers only the Flux-specific use of those tools
 
@@ -51,31 +51,29 @@
 
 ## GitOps and Flux
 
-* shared GitOps concepts
-  * for Git as the source of truth, desired and live state, pull-based delivery
-    and drift, see [GitOps in the Argo CD workshop](https://github.com/mtumilowicz/argoCD-workshop#gitops)
-* Flux implementation
+* for Git as the source of truth, desired and live state, pull-based delivery
+  and drift, see [GitOps in the Argo CD workshop](https://github.com/mtumilowicz/argoCD-workshop#gitops)
+    * refresher
+        ```text
+        developer → commit and push → Git
+                                      ↓ pull
+                                 Flux controllers
+                                      ↓ apply
+                                 Kubernetes API
+        ```
+* Flux
   * keeps reviewed desired state in Git
   * runs controllers inside the target environment
   * pulls desired state and continuously reconciles it with the live system
-* flow
-
-```text
-developer → commit and push → Git
-                              ↓ pull
-                         Flux controllers
-                              ↓ apply
-                         Kubernetes API
-```
-
-* push-pipeline difference
+* vs push-pipeline
   * CI holds cluster credentials
   * CI runs commands such as `kubectl apply` after a build
+  * difference: no reconciliation (drift correction), no auditability etc
 * Flux reconciliation
   * convergence
-    * live resources are moved toward the selected Git revision
+    * creates or updates resources until the cluster matches Git
   * drift correction
-    * managed fields changed manually are restored
+    * changes done manually are restored
   * deletion
     * resources removed from desired state can be pruned
   * auditability
@@ -90,29 +88,26 @@ developer → commit and push → Git
 
 * architecture
   * toolkit of specialized Kubernetes controllers
+    * `source-controller`
+      * watches: `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, `Bucket`
+      * fetches sources and publishes versioned artifacts
+    * `kustomize-controller`
+      * watches: Flux `Kustomization`
+      * decrypts, builds, validates, applies, checks and prunes manifests
+    * `helm-controller`
+      * watches: `HelmRelease`
+      * performs Helm install, upgrade, test, remediation and uninstall operations
+    * `notification-controller`
+      * watches: `Receiver`, `Provider`, `Alert`
+      * handles inbound webhooks and outbound events
+    * `image-reflector-controller`
+      * watches: `ImageRepository`, `ImagePolicy`
+      * scans registries and selects image versions
+    * `image-automation-controller`
+      * watches: `ImageUpdateAutomation`
+      * updates marked YAML and commits changes to Git
+    * the first four controllers are installed by default
   * controllers communicate through custom resources, status, artifacts and events
-* controllers
-  * `source-controller`
-    * watches: `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, `Bucket`
-    * fetches sources and publishes versioned artifacts
-  * `kustomize-controller`
-    * watches: Flux `Kustomization`
-    * decrypts, builds, validates, applies, checks and prunes manifests
-  * `helm-controller`
-    * watches: `HelmRelease`
-    * performs Helm install, upgrade, test, remediation and uninstall operations
-  * `notification-controller`
-    * watches: `Receiver`, `Provider`, `Alert`
-    * handles inbound webhooks and outbound events
-  * `image-reflector-controller`
-    * watches: `ImageRepository`, `ImagePolicy`
-    * scans registries and selects image versions
-  * `image-automation-controller`
-    * watches: `ImageUpdateAutomation`
-    * updates marked YAML and commits changes to Git
-* installation defaults
-  * the first four controllers are installed by default
-  * the image controllers are optional
 * workshop reconciliation path
 
 ```text
