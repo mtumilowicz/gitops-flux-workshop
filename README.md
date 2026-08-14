@@ -91,21 +91,46 @@
     * `source-controller`
       * watches: `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, `Bucket`
       * fetches sources and publishes versioned artifacts
+      * example: `GitRepository` tracks the `main` branch every three minutes
+        * the controller resolves the branch to an exact commit, fetches its
+          files and publishes a fixed snapshot for other controllers
     * `kustomize-controller`
       * watches: Flux `Kustomization`
       * decrypts, builds, validates, applies, checks and prunes manifests
+      * example
+        * a Flux `Kustomization` selects `apps/payment/production` in a source
+          artifact
+        * the controller combines a shared Deployment with a production patch,
+          applies the final YAML and waits for the rollout
     * `helm-controller`
       * watches: `HelmRelease`
       * performs Helm install, upgrade, test, remediation and uninstall operations
+      * example
+        * a `HelmRelease` requests Redis chart version `20.6.3` with three
+          replicas; the controller installs or upgrades that Helm release
+        * Helm is one Flux deployment option; Flux itself is not powered by Helm
     * `notification-controller`
       * watches: `Receiver`, `Provider`, `Alert`
       * handles inbound webhooks and outbound events
+      * example
+        * a GitHub push calls a `Receiver`, which requests reconciliation
+          immediately instead of waiting for the next source polling interval
+        * a failed `HelmRelease` matches an `Alert`, which sends the event through
+          a Slack `Provider`
     * `image-reflector-controller`
       * watches: `ImageRepository`, `ImagePolicy`
       * scans registries and selects image versions
+      * example
+        * an `ImageRepository` selects `ghcr.io/company/payment-api`; an
+          `ImagePolicy` permits stable `2.x` tags and selects `2.4.1`
+        * these resources contain the registry and selection configuration
     * `image-automation-controller`
       * watches: `ImageUpdateAutomation`
       * updates marked YAML and commits changes to Git
+      * example
+        * after an `ImagePolicy` selects `2.4.1`, the controller changes a marked
+          image from `payment-api:2.4.0` to `payment-api:2.4.1` and commits it
+        * normal Flux reconciliation then deploys the recorded Git change
     * the first four controllers are installed by default
   * controllers communicate through custom resources, status, artifacts and events
 * workshop reconciliation path
