@@ -531,8 +531,8 @@ HelmRepository or GitRepository
   * a Flux `Kustomization` can apply a `HelmRelease` and wait for it to become
     ready
 * workshop selection
-  * uses Kubernetes manifests
-  * exposes the `GitRepository` to Kustomize reconciliation path
+  * uses Kubernetes manifests because its purpose is to expose the
+    `GitRepository` to Kustomize reconciliation path
 
 ### Image automation
 
