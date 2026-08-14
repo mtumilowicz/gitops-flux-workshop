@@ -86,7 +86,7 @@
 
 ## Architecture and controllers
 
-* architecture
+* Flux architecture
   * toolkit of specialized Kubernetes controllers
     * `source-controller`
       * watches: `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, `Bucket`
