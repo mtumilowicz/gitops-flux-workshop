@@ -340,6 +340,51 @@ clusters/dev/nginx.yaml
   → nginx-dev resources
 ```
 
+### How the dev overlay is built
+
+Kustomize does not automatically load every YAML file in a directory. A
+`resources` list explicitly defines the files and Kustomize directories that
+participate in the build.
+
+The dev overlay starts with:
+
+```yaml
+resources:
+  - ../../base
+  - configmap.yaml
+  - secret.enc.yaml
+```
+
+The process is:
+
+1. Kustomize follows `../../base` and opens
+   `apps/nginx/base/kustomization.yaml`.
+2. The base registers `deployment.yaml` and `service.yaml` under `resources`.
+3. Kustomize loads the objects declared in those files:
+   `Deployment/nginx` and `Service/nginx`.
+4. Kustomize returns to the dev overlay and loads `ConfigMap/nginx-index` and
+   `Secret/nginx-workshop-secret`.
+5. The overlay registers `deployment-patch.yaml` under `patches`.
+6. Kustomize reads the patch identity:
+
+   ```yaml
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: nginx
+   ```
+
+7. Kustomize finds the loaded resource with the same API version, kind and
+   name: `apps/v1 Deployment/nginx`.
+8. It merges `spec.replicas: 1` into that Deployment. Other Deployments are not
+   selected.
+9. It assigns `nginx-dev` to namespaced resources and renders the final YAML.
+
+Filenames do not identify Kubernetes resources. `deployment.yaml` and
+`deployment-patch.yaml` could be renamed if their `kustomization.yaml`
+references were updated. Patch matching comes from `apiVersion`, `kind` and
+`metadata.name` inside the YAML.
+
 ## Reconciliation behavior
 
 * reconciliation
