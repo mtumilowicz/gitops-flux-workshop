@@ -13,41 +13,52 @@
 * [Repository structures](https://fluxcd.io/flux/guides/repository-structure/)
 * [SOPS decryption](https://fluxcd.io/flux/guides/mozilla-sops/)
 * [Flux security](https://fluxcd.io/flux/security/)
+* [Argo CD workshop](https://github.com/mtumilowicz/argoCD-workshop#readme)
 * [Argo CD overview](https://argo-cd.readthedocs.io/en/stable/)
 * [Argo CD architecture](https://argo-cd.readthedocs.io/en/stable/operator-manual/architecture/)
 * [Argo CD Helm support](https://argo-cd.readthedocs.io/en/stable/user-guide/helm/)
 
 ## Workshop
 
-The workshop demonstrates pull-based GitOps with Flux on Docker Desktop
-Kubernetes. It deploys the same nginx base to two namespaces:
-
-| Environment | Namespace | Replicas | Page |
-| --- | --- | ---: | --- |
-| dev | `nginx-dev` | 1 | `environment: dev` |
-| prod | `nginx-prod` | 2 | `environment: prod` |
-
-Each overlay provides its page through a `ConfigMap`. There is no application
-project or image build.
-
-Prerequisite knowledge:
-
-* Kustomize bases, overlays and patches from `kustomize-workshop`
-* SOPS recipients, identities and encrypted YAML from `sops-age-key-workshop`
-
-This repository covers only the Flux-specific use of those tools.
+* purpose
+  * demonstrates pull-based GitOps with Flux on Docker Desktop Kubernetes
+  * deploys the same nginx base to two namespaces
+* environments
+  * dev
+    * namespace: `nginx-dev`
+    * replicas: 1
+    * page: `environment: dev`
+  * prod
+    * namespace: `nginx-prod`
+    * replicas: 2
+    * page: `environment: prod`
+* application
+  * each overlay provides its page through a `ConfigMap`
+  * there is no application project or image build
+* prerequisite knowledge
+  * Kustomize bases, overlays and patches from `kustomize-workshop`
+  * SOPS recipients, identities and encrypted YAML from `sops-age-key-workshop`
+* scope
+  * covers only the Flux-specific use of those tools
 
 ### Warning
 
-[`local-setup/workshop.agekey`](./local-setup/workshop.agekey) is a disposable
-private identity committed for reproducibility. It provides no confidentiality.
-Production private identities must be delivered outside Git.
+* [`local-setup/workshop.agekey`](./local-setup/workshop.agekey)
+  * disposable private identity committed for reproducibility
+  * provides no confidentiality
+* production private identities
+  * must be delivered outside Git
 
 ## GitOps and Flux
 
-GitOps keeps reviewed desired state in Git. A controller inside the target
-environment pulls that state and continuously reconciles it with the live
-system.
+* shared GitOps concepts
+  * for Git as the source of truth, desired and live state, pull-based delivery
+    and drift, see [GitOps in the Argo CD workshop](https://github.com/mtumilowicz/argoCD-workshop#gitops)
+* Flux implementation
+  * keeps reviewed desired state in Git
+  * runs controllers inside the target environment
+  * pulls desired state and continuously reconciles it with the live system
+* flow
 
 ```text
 developer → commit and push → Git
@@ -57,37 +68,52 @@ developer → commit and push → Git
                          Kubernetes API
 ```
 
-This differs from a push pipeline, where CI holds cluster credentials and runs
-commands such as `kubectl apply` after a build.
-
-Flux reconciliation provides:
-
-* convergence: live resources are moved toward the selected Git revision
-* drift correction: managed fields changed manually are restored
-* deletion: resources removed from desired state can be pruned
-* auditability: Git records who proposed and approved a change
-* recovery: a previous desired state can be restored with another Git commit
-
-Git records desired state. Kubernetes status records current health and
-observed state.
+* push-pipeline difference
+  * CI holds cluster credentials
+  * CI runs commands such as `kubectl apply` after a build
+* Flux reconciliation
+  * convergence
+    * live resources are moved toward the selected Git revision
+  * drift correction
+    * managed fields changed manually are restored
+  * deletion
+    * resources removed from desired state can be pruned
+  * auditability
+    * Git records who proposed and approved a change
+  * recovery
+    * a previous desired state can be restored with another Git commit
+* state
+  * Git records desired state
+  * Kubernetes status records current health and observed state
 
 ## Architecture and controllers
 
-Flux is a toolkit of specialized Kubernetes controllers. Controllers
-communicate through custom resources, status, artifacts and events.
-
-| Controller | Watches | Responsibility |
-| --- | --- | --- |
-| `source-controller` | `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, `Bucket` | fetches sources and publishes versioned artifacts |
-| `kustomize-controller` | Flux `Kustomization` | decrypts, builds, validates, applies, checks and prunes manifests |
-| `helm-controller` | `HelmRelease` | performs Helm install, upgrade, test, remediation and uninstall operations |
-| `notification-controller` | `Receiver`, `Provider`, `Alert` | handles inbound webhooks and outbound events |
-| `image-reflector-controller` | `ImageRepository`, `ImagePolicy` | scans registries and selects image versions |
-| `image-automation-controller` | `ImageUpdateAutomation` | updates marked YAML and commits changes to Git |
-
-The first four are installed by default. The image controllers are optional.
-
-The workshop follows this path:
+* architecture
+  * toolkit of specialized Kubernetes controllers
+  * controllers communicate through custom resources, status, artifacts and events
+* controllers
+  * `source-controller`
+    * watches: `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, `Bucket`
+    * fetches sources and publishes versioned artifacts
+  * `kustomize-controller`
+    * watches: Flux `Kustomization`
+    * decrypts, builds, validates, applies, checks and prunes manifests
+  * `helm-controller`
+    * watches: `HelmRelease`
+    * performs Helm install, upgrade, test, remediation and uninstall operations
+  * `notification-controller`
+    * watches: `Receiver`, `Provider`, `Alert`
+    * handles inbound webhooks and outbound events
+  * `image-reflector-controller`
+    * watches: `ImageRepository`, `ImagePolicy`
+    * scans registries and selects image versions
+  * `image-automation-controller`
+    * watches: `ImageUpdateAutomation`
+    * updates marked YAML and commits changes to Git
+* installation defaults
+  * the first four controllers are installed by default
+  * the image controllers are optional
+* workshop reconciliation path
 
 ```text
 Git commit
@@ -101,30 +127,33 @@ Git commit
   → readiness and inventory
 ```
 
-A new source artifact emits an event. Referencing controllers can reconcile
-before their normal interval expires. A `Receiver` webhook can request source
-reconciliation sooner than polling.
+* reconciliation triggers
+  * a new source artifact emits an event
+  * referencing controllers can reconcile before their normal interval expires
+  * a `Receiver` webhook can request source reconciliation sooner than polling
 
 ## Installation versus bootstrap
 
 ### Installation
 
-The workshop uses:
+* workshop command
 
 ```bash
 flux install
 ```
 
-It installs Flux CRDs, controllers, RBAC and network policies. It does not
-connect the cluster to this repository or store the installation manifests in
-Git. The workshop creates the source and reconciliation objects explicitly.
-
-`flux install` is intended for development and testing. Current Flux guidance
-recommends bootstrap for long-lived installations.
+* result
+  * installs Flux CRDs, controllers, RBAC and network policies
+  * does not connect the cluster to this repository
+  * does not store the installation manifests in Git
+  * the workshop creates the source and reconciliation objects explicitly
+* use
+  * `flux install` is intended for development and testing
+  * current Flux guidance recommends bootstrap for long-lived installations
 
 ### Bootstrap
 
-A corresponding GitHub bootstrap would resemble:
+* corresponding GitHub command
 
 ```bash
 flux bootstrap github \
@@ -135,27 +164,31 @@ flux bootstrap github \
   --personal
 ```
 
-Do not run this command during the workshop. It would modify the repository.
-
-Bootstrap:
-
-* installs or upgrades Flux
-* configures Git authentication
-* commits controller and synchronization manifests
-* creates a `GitRepository` and root Flux `Kustomization`
-* makes Flux manage its own installation from Git
-* is idempotent
-
-The generated `flux-system` directory normally contains:
-
-* `gotk-components.yaml`: Flux CRDs, controllers, RBAC and supporting resources
-* `gotk-sync.yaml`: the bootstrap `GitRepository` and Flux `Kustomization`
-* `kustomization.yaml`: the Kustomize entry point for both files
-
-Use installation for an isolated experiment. Use bootstrap when the cluster
-should be reproducible and Flux upgrades should also follow Git.
+* workshop restriction
+  * do not run this command during the workshop
+  * it would modify the repository
+* behavior
+  * installs or upgrades Flux
+  * configures Git authentication
+  * commits controller and synchronization manifests
+  * creates a `GitRepository` and root Flux `Kustomization`
+  * makes Flux manage its own installation from Git
+  * is idempotent
+* generated `flux-system` directory
+  * `gotk-components.yaml`
+    * Flux CRDs, controllers, RBAC and supporting resources
+  * `gotk-sync.yaml`
+    * bootstrap `GitRepository` and Flux `Kustomization`
+  * `kustomization.yaml`
+    * Kustomize entry point for both files
+* selection
+  * use installation for an isolated experiment
+  * use bootstrap when the cluster should be reproducible and Flux upgrades
+    should also follow Git
 
 ## Repository structure
+
+* layout
 
 ```text
 .
@@ -202,22 +235,29 @@ should be reproducible and Flux upgrades should also follow Git.
         └── kustomization.yaml                  # groups both prod Flux objects
 ```
 
-Docker Desktop supplies one physical cluster. `dev` and `prod` are logical
-environments in separate namespaces.
-
-Names such as `apps`, `infrastructure`, `clusters`, `base`, `overlays`, `dev`
-and `prod` are conventions. Flux requires valid API objects, references and
-artifact paths; it does not require these names.
-
-Common alternatives are:
-
-* monorepo: applications, infrastructure and environments in one repository
-* repository per cluster: strong cluster ownership, more shared-content coordination
-* application source plus deployment repository: separates builds from promotion
-* repository per team: clear ownership, more sources and credentials to operate
-
-This workshop uses a monorepo because one commit can show the complete source,
-environment and reconciliation relationship.
+* environment model
+  * Docker Desktop supplies one physical cluster
+  * `dev` and `prod` are logical environments in separate namespaces
+* directory names
+  * `apps`, `infrastructure`, `clusters`, `base`, `overlays`, `dev` and `prod`
+    are conventions
+  * Flux requires valid API objects, references and artifact paths
+  * Flux does not require these names
+* common repository structures
+  * monorepo
+    * applications, infrastructure and environments in one repository
+  * repository per cluster
+    * strong cluster ownership
+    * more shared-content coordination
+  * application source plus deployment repository
+    * separates builds from promotion
+  * repository per team
+    * clear ownership
+    * more sources and credentials to operate
+* workshop selection
+  * uses a monorepo
+  * one commit can show the complete source, environment and reconciliation
+    relationship
 
 ## `GitRepository` and source artifacts
 
