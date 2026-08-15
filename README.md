@@ -509,25 +509,48 @@ Use the existing nested-bullet style:
      ```
 
   2. `source-controller` downloads the repository's `index.yaml`
+    * example
+        ```
+        apiVersion: v1
+           entries:
+             webapp:
+               - version: 2.4.1
+                 appVersion: "1.8.0"
+                 description: Company web application
+                 urls:
+                   - https://example.com/charts/webapp-2.4.1.tgz
+                 digest: sha256:abc123...
+               - version: 2.3.0
+                 appVersion: "1.7.0"
+                 urls:
+                   - https://example.com/charts/webapp-2.3.0.tgz
+                 digest: sha256:def456...
+        ```
   3. it stores `index.yaml` as the `HelmRepository` artifact
-  4. a `HelmRelease` selects a chart from that repository
-
-     ```yaml
-     kind: HelmRelease
-     spec:
-       chart:
+  4. `HelmRelease` requests a chart name and version
+    * example
+         ```yaml
+         kind: HelmRelease
          spec:
-           chart: webapp
-           version: "2.4.1"
-           sourceRef:
-             kind: HelmRepository
-             name: company-charts
-     ```
+           chart:
+             spec:
+               chart: webapp
+               version: "2.4.1"
+               sourceRef:
+                 kind: HelmRepository
+                 name: company-charts
+         ```
   5. `helm-controller` creates a `HelmChart` object from
      `HelmRelease.spec.chart.spec`
   6. `source-controller` processes the `HelmChart`
      * reads the referenced `HelmRepository` index
      * finds chart `webapp`, version `2.4.1`
+        * if the requested version is absent from `index.yaml`
+          * `helm-controller` still creates the `HelmChart` object
+          * `source-controller` cannot find the requested chart package
+          * no `HelmChart.status.artifact` is produced
+          * the `HelmChart` reports `Ready=False`
+          * the `HelmRelease` cannot proceed with the installation or upgrade
      * downloads the chart package
      * stores it as the `HelmChart` artifact
   7. `helm-controller` uses the chart artifact
@@ -685,114 +708,6 @@ Use the existing nested-bullet style:
   * `<purpose>-sync.yaml`: manifest containing a Flux `Kustomization` object
   * `<application>-<environment>`: suggested Flux `Kustomization.metadata.name`
 
-#### Workshop input
-
-* [`clusters/dev/nginx-sync.yaml`](./clusters/dev/nginx-sync.yaml) is the Flux object
-
-```yaml
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: nginx-dev
-  namespace: flux-system
-spec:
-  sourceRef:
-    kind: GitRepository
-    name: gitops-flux-workshop
-  path: ./apps/nginx/overlays/dev
-  decryption:
-    provider: sops
-    secretRef:
-      name: sops-age
-  prune: true
-  wait: true
-```
-
-* `sourceRef`
-  * points to `GitRepository/gitops-flux-workshop` in `flux-system`
-  * the referenced object's `status.artifact` supplies the exact repository
-    snapshot and Git revision
-* `path`
-  * directory inside that extracted snapshot
-  * not a local path in the controller container and not a GitHub URL
-* `decryption`
-  * tells the controller to use the private age identity from
-    `Secret/sops-age` when it encounters SOPS-encrypted input
-* `prune` and `wait`
-  * delete obsolete owned objects and wait for applied objects to become ready
-
-* the selected directory contains these build instructions
-
-```yaml
-# apps/nginx/overlays/dev/kustomization.yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: nginx-dev
-resources:
-  - ../../base
-  - configmap.yaml
-  - secret.enc.yaml
-patches:
-  - path: deployment-patch.yaml
-```
-
-* because this directory contains `kustomization.yaml`, only files reached from
-  its resources, generators, components or patches take part in this build
-* if `spec.path` contains no Kustomize file, kustomize-controller can generate
-  build instructions automatically from the YAML files it finds there
-* `../../base/kustomization.yaml` loads the reusable base
-  * [`deployment.yaml`](./apps/nginx/base/deployment.yaml) defines
-    `Deployment/nginx`
-  * [`service.yaml`](./apps/nginx/base/service.yaml) defines `Service/nginx`
-* reusable base means source YAML reused by both environment builds
-  * dev and prod do not share one live `Deployment`
-  * each overlay renders and applies a separate `Deployment` in its namespace
-* [`deployment-patch.yaml`](./apps/nginx/overlays/dev/deployment-patch.yaml)
-  matches the object by API version, kind and name
-  * the dev patch sets `Deployment/nginx` to one replica
-  * the prod patch sets its separately rendered Deployment to two replicas
-
-#### One reconciliation
-
-1. `kustomize-controller` resolves `sourceRef` through the Kubernetes API.
-2. It waits until the `GitRepository` reports a ready artifact.
-3. It downloads and verifies the artifact, then opens
-   `apps/nginx/overlays/dev` inside it.
-4. It follows `resources` into the base and loads the Deployment, Service,
-   ConfigMap and encrypted Secret manifests.
-5. It decrypts the SOPS document in memory before building.
-6. Kustomize applies the dev patch and the `nginx-dev` namespace transformation.
-7. The build output is four ordinary Kubernetes objects:
-   `Deployment/nginx`, `Service/nginx`, `ConfigMap/nginx-index` and
-   `Secret/nginx-workshop-secret`, all in `nginx-dev`.
-8. The controller checks the objects with the Kubernetes API and applies them
-   with server-side apply.
-9. With `wait: true`, it checks their health until they are ready or the timeout
-   expires.
-10. It records the applied object identities in `.status.inventory`.
-11. With `prune: true`, it deletes an object from that inventory when a later
-    successful build no longer contains it.
-
-#### Meaning of the controller operations
-
-* decrypt
-  * convert a referenced SOPS-encrypted manifest to plaintext in memory
-  * the encrypted file remains encrypted in Git
-* build
-  * render a deterministic set of final Kubernetes manifests from the declared
-    Kustomize inputs
-* validate and apply
-  * submit the final objects to the Kubernetes API using server-side dry-run and
-    server-side apply
-  * schema, admission-policy or authorization errors fail the reconciliation
-* check
-  * inspect readiness for supported objects when health waiting is enabled
-  * for this workshop, that includes waiting for the nginx Deployment rollout
-* prune
-  * delete successfully applied objects that this Flux `Kustomization` owns and
-    that disappeared from its latest successful output
-  * it does not delete arbitrary objects in the namespace
-
 ### `helm-controller`
 
 * purpose
@@ -802,128 +717,72 @@ patches:
   * keeps the chosen chart, values and failure behavior reconciled
 
 #### Chart, release and Flux objects
-
-* Helm chart
-  * reusable package containing templates, default values and metadata
-  * templates may render a Deployment, Service, RBAC objects and other
-    Kubernetes manifests
-  * not itself an installed application
-* Helm release
-  * one installed instance of one chart with a release name, namespace, merged
-    values and revision history
-  * a Helm concept, not one Kubernetes workload object
-    * rendered Deployments, Services and other objects are the installed content
-    * Helm normally stores release history as Helm-owned Secrets in Kubernetes
-  * the same Redis chart could be installed as separate `dev-redis` and
-    `prod-redis` releases with different values
-* `HelmRepository`
-  * source-controller object describing where chart packages can be found
-* `HelmChart`
-  * source-controller object requesting one chart package from a source
-  * its artifact is the selected `.tgz` package used by helm-controller
-* `HelmRelease`
-  * desired-state object watched by helm-controller
-  * declares which chart to install, its version and values, and policies for
-    upgrades, tests and failures
-
-* these are related objects, not different representations of one object
-
-```text
-HelmRepository: where charts are available
-        ↓ referenced by
-HelmChart:      fetch this chart package and version
-        ↓ artifact consumed by
-HelmRelease:    install one release from that package with these values
-        ↓ Helm operation creates or updates
-Kubernetes objects: Deployment, Service, ConfigMap, ...
-```
-
-* a `HelmRelease` manifest by itself does not install anything
-  * Kubernetes can store it because the CRD exists
-  * helm-controller supplies the behavior that turns it into Helm actions
-* a Flux `Kustomization` commonly applies the `HelmRepository` and `HelmRelease`
-  objects from Git
-  * kustomize-controller stops after creating or updating those API objects
-  * with health waiting enabled, it can wait for the `HelmRelease` to report
-    ready, but it does not perform the Helm install
-  * source-controller and helm-controller then perform their own work
 * Flux is not powered by Helm
   * Helm support is installed by default, but plain manifests and Kustomize do
     not pass through helm-controller
+* helm refresher
+    * Helm chart = reusable package containing templates, default values and metadata
+      * templates may render a Deployment, Service, RBAC objects and other
+        Kubernetes manifests
+      * not itself an installed application
+    * Helm release = one installed instance of one chart
+      * example: the same Redis chart could be installed as separate `dev-redis` and `prod-redis` releases with different values
+* Flux objects
+  * `HelmRepository`
+    * identifies an HTTP/S Helm repository
+    * watched by `source-controller`
+    * its artifact is the repository's `index.yaml`
+  * `HelmRelease`
+    * manifest is normally committed to Git
+    * `kustomize-controller` applies the manifest and creates the live
+      `HelmRelease` object
+    * selects the chart name, version and values
+    * watched by `helm-controller`
+  * `HelmChart`
+    * normally created automatically by `helm-controller` from the
+      `HelmRelease`
+    * requests the selected chart package
+    * watched by `source-controller`
+    * its artifact is the downloaded chart `.tgz`
+  * controller responsibilities
+    * `source-controller` obtains the repository index and chart package
+    * `helm-controller` renders, installs and continuously reconciles the Helm
+      release
+* flow
+  ```
+  HelmRepository
+    → identifies an HTTP/S Helm repository
 
-#### ingress-nginx example
+  source-controller
+    → downloads its index.yaml
+    → stores index.yaml as the HelmRepository artifact
 
-* Git contains two desired-state manifests
-* `Namespace/ingress-nginx` must exist before the namespaced `HelmRelease` can be
-  created
-* repository location and polling configuration
+  HelmRelease manifest
+    → YAML file committed to Git
+    → selects a chart name, chart version and values
 
-```yaml
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: HelmRepository
-metadata:
-  name: ingress-nginx
-  namespace: flux-system
-spec:
-  interval: 10m
-  url: https://kubernetes.github.io/ingress-nginx
-```
+  kustomize-controller
+    → reads the HelmRelease manifest from the GitRepository artifact
+    → applies it to the Kubernetes API
 
-* requested installed release
+  Kubernetes API
+    → stores the live HelmRelease object
 
-```yaml
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: ingress-nginx
-  namespace: ingress-nginx
-spec:
-  interval: 10m
-  chart:
-    spec:
-      chart: ingress-nginx
-      version: "4.13.0"
-      sourceRef:
-        kind: HelmRepository
-        name: ingress-nginx
-        namespace: flux-system
-  values:
-    controller:
-      replicaCount: 2
-```
+  helm-controller
+    → detects the HelmRelease object
+    → creates a HelmChart object for its chart selection
 
-* exact connection
-  1. kustomize-controller applies both custom resources from the Git artifact.
-  2. source-controller fetches the `HelmRepository` `index.yaml` and publishes
-     that exact index as an artifact.
-  3. helm-controller notices `HelmRelease/ingress-nginx`.
-  4. From `spec.chart.spec`, it creates an associated `HelmChart` object in the
-     source namespace. That object requests chart `ingress-nginx` version
-     `4.13.0` from `HelmRepository/ingress-nginx`.
-     `HelmRelease.status.helmChart` reports the associated object's reference.
-  5. source-controller notices the `HelmChart`, finds that chart and version in
-     the repository index, downloads the `.tgz`, and publishes it as the
-     `HelmChart` artifact.
-  6. helm-controller waits for that artifact, downloads it and merges the chart's
-     default values with `controller.replicaCount: 2` from the `HelmRelease`.
-  7. It renders the chart templates and performs a Helm install. The rendered
-     Kubernetes objects are submitted to the API server in the release
-     namespace. Because `spec.targetNamespace` is omitted, this is the
-     `HelmRelease` namespace, `ingress-nginx`.
-  8. It records the result and current chart revision in the `HelmRelease`
-     `status`.
-* later behavior
-  * a changed chart version or values normally causes a Helm upgrade
-  * configured Helm tests can run after install or upgrade
-  * failure policies can retry, roll back or uninstall a failed revision
-  * deleting the `HelmRelease` normally causes helm-controller to uninstall the
-    release
-* the controller uses the Helm libraries and Helm release model
-  * it does not convert the chart into a Flux `Kustomization`
-  * the generated `HelmChart` requests a package whose artifact is fixed for one
-    revision; the `HelmRelease` remains the desired installed instance
-* workshop scope
-  * this workshop does not create a `HelmRepository`, `HelmChart` or `HelmRelease`
+  source-controller
+    → reads the HelmRepository artifact
+    → finds the chart's download URL in index.yaml
+    → downloads the selected chart package
+    → stores the package as the HelmChart artifact
+
+  helm-controller
+    → downloads the HelmChart artifact
+    → renders the chart using the HelmRelease values
+    → installs or upgrades the resulting Kubernetes resources
+  ```
 
 ### `notification-controller`
 
@@ -953,42 +812,38 @@ metadata:
   name: platform-github
   namespace: flux-system
 spec:
-  type: github
+  type: github # selects GitHub payload parsing and HMAC signature verification
   events:
-    - push
-  secretRef:
-    name: github-webhook-token
-  resources:
+    - push # ignores other GitHub webhook event types
+  secretRef: # Kubernetes Secret in the `Receiver` namespace containing the webhook token
+    name: github-webhook-token # same token is configured as the GitHub webhook secret
+  resources: # objects to reconcile after an accepted request
     - apiVersion: source.toolkit.fluxcd.io/v1
       kind: GitRepository
       name: platform-config
 ```
-
-* field meanings
-  * `type: github`
-    * selects GitHub payload parsing and HMAC signature verification
-  * `events: [push]`
-    * ignores other GitHub webhook event types
-  * `secretRef`
-    * points to a Kubernetes Secret in the `Receiver` namespace containing the
-      webhook token
-    * the same token is configured as the GitHub webhook secret
-  * `resources`
-    * exact Flux objects to reconcile after an accepted request
-    * here it is `GitRepository/platform-config`, not every source in the cluster
-* setup and flow
-  1. notification-controller watches the `Receiver` object.
-  2. It calculates a unique path and reports it in
-     `Receiver.status.webhookPath`.
-  3. An operator exposes the controller's `webhook-receiver` Service through an
+* flow
+  1. notification-controller watches the `Receiver` object
+    * creates the HTTP path on which this particular Receiver accepts webhooks
+    * reports it in `Receiver.status.webhookPath`
+  1. An operator exposes the controller's `webhook-receiver` Service through an
      Ingress or another external endpoint.
-  4. The complete URL and shared secret are configured in GitHub repository
+  1. The complete URL and shared secret are configured in GitHub repository
      webhook settings.
-  5. After a push, GitHub sends an HTTP request to that URL.
-  6. notification-controller verifies its signature and checks the event type.
-  7. It requests reconciliation of the listed `GitRepository` through the
+  1. After a push, GitHub sends an HTTP request to that URL.
+  1. notification-controller verifies its signature and checks the event type
+    * GitHub’s webhook protocol uses a shared secret and HMAC (Hash-based Message Authentication Code)
+        * fast and simple
+        * each webhook has different secret
+    * GitHub
+        → calculates an HMAC signature of the request body using the token
+        → sends the signature in X-Hub-Signature
+    * notification-controller
+        → calculates the expected signature using the same token
+        → compares the signatures
+  1. It requests reconciliation of the listed `GitRepository` through the
      Kubernetes API.
-  8. source-controller then contacts Git and resolves the branch tip normally.
+  1. source-controller then contacts Git and resolves the branch tip normally.
 * the webhook does not send all commits or apply their files
   * it is a prompt meaning “check this source now”
   * source-controller still produces one snapshot for the newest selected
@@ -1032,7 +887,7 @@ spec:
       name: nginx-prod
 ```
 
-* connection
+* flow
   1. `kustomize-controller` encounters an error while reconciling
      `Kustomization/nginx-prod`.
   2. It sends a Flux event containing the involved object, severity, reason,
@@ -1042,189 +897,51 @@ spec:
   5. The Provider supplies the Slack API address, channel and Secret containing
      the bot token.
   6. notification-controller formats and sends the Slack message.
-* other Provider types can send generic webhooks, Microsoft Teams messages,
-  Git commit statuses and events to other supported systems
 
-* workshop scope
-  * no `Receiver`, `Provider` or `Alert` resources are included
-  * Kubernetes events and controller logs remain available locally
+### Image controllers
 
-### `image-reflector-controller`
+* optional Flux components
+  * useful when CI builds and pushes container images but does not update the
+    deployment repository
+  * automatically select an allowed image version and commit it to Git
+  * unnecessary when CI already updates Git
+* example: development environment
+  1. Git contains a development Deployment using version `2.4.0`.
 
-* purpose
-  * watches `ImageRepository` and `ImagePolicy` objects
-  * discovers tags available in a container registry
-  * calculates which tag satisfies a declared rule
-  * does not change Git or a running Kubernetes workload
+     ```yaml
+     image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-dev"}
+     ```
 
-#### Configuration
+  2. CI builds and pushes new tags to the registry.
 
-* the configuration is stored in Kubernetes objects
-  * their manifests are normally committed to Git and applied by a Flux
-    `Kustomization`
-  * they are not configured in the container registry or in a controller file
-* example
+     ```text
+     2.4.1
+     2.5.0-rc.1
+     3.0.0
+     ```
 
-```yaml
-apiVersion: image.toolkit.fluxcd.io/v1
-kind: ImageRepository
-metadata:
-  name: payment-api
-  namespace: flux-system
-spec:
-  image: ghcr.io/company/payment-api
-  interval: 1m
-  secretRef:
-    name: registry-credentials
----
-apiVersion: image.toolkit.fluxcd.io/v1
-kind: ImagePolicy
-metadata:
-  name: payment-api
-  namespace: flux-system
-spec:
-  imageRepositoryRef:
-    name: payment-api
-  policy:
-    semver:
-      range: ">=2.0.0 <3.0.0"
-```
+  3. `image-reflector-controller`
+     * scans the registry using an `ImageRepository`
+     * applies an `ImagePolicy`, for example:
 
-* `ImageRepository`
-  * `spec.image` is a registry repository without a tag
-  * `spec.interval` controls registry scans
-  * `spec.secretRef` is optional for a public registry; for a private registry it
-    points to credentials in a Kubernetes Secret in the same namespace
-* `ImagePolicy`
-  * `imageRepositoryRef` points to the scanned tag set
-  * `policy` defines how to choose one tag
-  * supported ordering policies are semantic-version, alphabetical and numerical
+       ```yaml
+       policy:
+         semver:
+           range: ">=2.0.0 <3.0.0"
+       ```
 
-#### Scan and selection
-
-1. image-reflector-controller calls the registry API for
-   `ghcr.io/company/payment-api` every minute.
-2. It lists tag metadata; it does not pull and run every container image.
-3. It stores the tag set in a rebuildable internal controller database and
-   reports scan time and tag count in `ImageRepository.status`.
-4. When that set changes, it reevaluates `ImagePolicy/payment-api`.
-5. Suppose the registry contains `2.4.0`, `2.4.1`, `2.5.0-rc.1` and `3.0.0`.
-6. The semantic-version range excludes the prerelease and major version 3, so
-   the selected tag is `2.4.1`.
-7. The result is reported on the policy object.
-
-```yaml
-status:
-  latestRef:
-    image: ghcr.io/company/payment-api
-    tag: 2.4.1
-```
-
-* “selects” therefore means “calculates and writes `ImagePolicy.status`”
-  * nothing is deployed from this result by image-reflector-controller
-  * an operator can inspect it
-  * image-automation-controller can use it to update marked Git fields
-
-### `image-automation-controller`
-
-* purpose
-  * watches `ImageUpdateAutomation` objects
-  * writes results from `ImagePolicy.status.latestRef` into marked YAML fields
-  * commits and pushes those edits to Git
-
-#### Why update Git
-
-* example problem
-  1. Git declares `payment-api:2.4.0`.
-  2. CI builds and pushes permitted image `payment-api:2.4.1`.
-  3. image-reflector-controller selects `2.4.1`.
-  4. Git still declares `2.4.0`, so normal GitOps reconciliation still deploys
-     `2.4.0`.
-* changing only the live Deployment would be incorrect
-  * Git would no longer describe the live state
-  * kustomize-controller would detect drift and restore `2.4.0`
-  * there would be no Git commit recording the deployment change
-* image automation closes the loop by making `2.4.1` the new desired state in
-  Git
-
-#### Update configuration
-
-```yaml
-apiVersion: image.toolkit.fluxcd.io/v1
-kind: ImageUpdateAutomation
-metadata:
-  name: payment-api
-  namespace: flux-system
-spec:
-  interval: 5m
-  sourceRef:
-    kind: GitRepository
-    name: platform-config
-  git:
-    checkout:
-      ref:
-        branch: main
-    commit:
-      author:
-        name: flux-image-automation
-        email: flux@example.com
-    push:
-      branch: main
-  update:
-    path: ./apps/payment
-    strategy: Setters
-```
-
-* target selection
-  * `sourceRef`
-    * identifies the `GitRepository` whose remote URL and authentication are used
-    * authentication must permit Git push, not only read
-  * `git.checkout`
-    * branch used as the input working tree
-  * `git.push`
-    * branch receiving the new commit
-  * `update.path`
-    * limits the YAML scan to one directory in that checkout
-  * image policy marker
-    * inline YAML comment identifying the policy for one scalar field
-    * the automation lists policies in its namespace; it has no separate
-      `policyRef` field
-
-* marked Deployment field
-
-```yaml
-image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api"}
-```
-
-* marker meaning
-  * `flux-system` is the `ImagePolicy` namespace
-  * `payment-api` is its name
-  * the basic marker updates the complete image value on that YAML line
-  * an unmarked image field is left unchanged
-
-#### One update
-
-1. `ImagePolicy/payment-api` reports tag `2.4.1` in `status.latestRef`.
-2. On its interval, image-automation-controller reads
-   `ImageUpdateAutomation/payment-api`.
-3. It uses `GitRepository/platform-config` for the Git URL and write
-   credentials, then checks out `main`.
-4. It scans YAML under `apps/payment` and finds the marker for
-   `flux-system:payment-api`.
-5. It changes only the marked value to
-   `ghcr.io/company/payment-api:2.4.1`.
-6. It creates a Git commit with the configured author and pushes it to `main`.
-7. It reports the pushed commit in `ImageUpdateAutomation.status.lastPushCommit`.
-8. source-controller notices that new Git commit and publishes a new artifact.
-9. Normal Kustomize or Helm reconciliation deploys the committed value.
-
-* approval workflow
-  * direct push to `main` deploys without a pull-request approval
-  * `git.push.branch` can instead target an automation branch
-  * separate CI automation can open a pull request from that branch; Flux image
-    automation does not create the pull request itself
-* workshop scope
-  * the image controllers are optional and are not configured in this workshop
+     * selects the highest permitted stable tag: `2.4.1`
+     * does not update Git or Kubernetes
+  4. `image-automation-controller`
+     * finds the marked image field in the development Deployment
+     * changes `payment-api:2.4.0` to `payment-api:2.4.1`
+     * commits and pushes the change to Git
+  5. normal Flux reconciliation deploys the committed image version to the
+     development environment
+* the image itself is stored in the container registry
+* only its reference, such as `ghcr.io/company/payment-api:2.4.1`, is committed
+  to Git
+* these controllers are not configured in this workshop
 
 ### Controller path used by this workshop
 
@@ -2022,3 +1739,24 @@ flux uninstall --namespace=flux-system
 
 # troubleshoot
 * helmrelease one condition false, why?
+
+#### One reconciliation
+
+1. `kustomize-controller` resolves `sourceRef` through the Kubernetes API.
+2. It waits until the `GitRepository` reports a ready artifact.
+3. It downloads and verifies the artifact, then opens
+   `apps/nginx/overlays/dev` inside it.
+4. It follows `resources` into the base and loads the Deployment, Service,
+   ConfigMap and encrypted Secret manifests.
+5. It decrypts the SOPS document in memory before building.
+6. Kustomize applies the dev patch and the `nginx-dev` namespace transformation.
+7. The build output is four ordinary Kubernetes objects:
+   `Deployment/nginx`, `Service/nginx`, `ConfigMap/nginx-index` and
+   `Secret/nginx-workshop-secret`, all in `nginx-dev`.
+8. The controller checks the objects with the Kubernetes API and applies them
+   with server-side apply.
+9. With `wait: true`, it checks their health until they are ready or the timeout
+   expires.
+10. It records the applied object identities in `.status.inventory`.
+11. With `prune: true`, it deletes an object from that inventory when a later
+    successful build no longer contains it.
