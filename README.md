@@ -687,13 +687,13 @@ Use the existing nested-bullet style:
 
 #### Workshop input
 
-* [`clusters/dev/nginx.yaml`](./clusters/dev/nginx.yaml) is the Flux object
+* [`clusters/dev/nginx-sync.yaml`](./clusters/dev/nginx-sync.yaml) is the Flux object
 
 ```yaml
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: dev-nginx
+  name: nginx-dev
   namespace: flux-system
 spec:
   sourceRef:
@@ -1029,12 +1029,12 @@ spec:
   eventSeverity: error
   eventSources:
     - kind: Kustomization
-      name: prod-nginx
+      name: nginx-prod
 ```
 
 * connection
   1. `kustomize-controller` encounters an error while reconciling
-     `Kustomization/prod-nginx`.
+     `Kustomization/nginx-prod`.
   2. It sends a Flux event containing the involved object, severity, reason,
      message and source revision to notification-controller's event API.
   3. `Alert/production-errors` matches that object and `error` severity.
@@ -1354,12 +1354,12 @@ flux bootstrap github \
     ├── source.yaml                             # shared GitRepository
     ├── kustomization.yaml                      # local entry point for all Flux objects
     ├── dev/
-    │   ├── namespaces.yaml                     # Flux Kustomization for the dev namespace
-    │   ├── nginx.yaml                          # Flux Kustomization for the dev workload
+    │   ├── namespaces-sync.yaml                # Flux Kustomization for the dev namespace
+    │   ├── nginx-sync.yaml                     # Flux Kustomization for the dev workload
     │   └── kustomization.yaml                  # groups both dev Flux objects
     └── prod/
-        ├── namespaces.yaml                     # Flux Kustomization for the prod namespace
-        ├── nginx.yaml                          # Flux Kustomization for the prod workload
+        ├── namespaces-sync.yaml                # Flux Kustomization for the prod namespace
+        ├── nginx-sync.yaml                     # Flux Kustomization for the prod workload
         └── kustomization.yaml                  # groups both prod Flux objects
 ```
 
@@ -1436,7 +1436,7 @@ spec:
 ## Flux `Kustomization`
 
 * definition
-  * [`clusters/dev/nginx.yaml`](./clusters/dev/nginx.yaml) defines the dev
+  * [`clusters/dev/nginx-sync.yaml`](./clusters/dev/nginx-sync.yaml) defines the dev
     reconciliation pipeline
 * configuration
 
@@ -1444,7 +1444,7 @@ spec:
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
-  name: dev-nginx
+  name: nginx-dev
   namespace: flux-system
 spec:
   interval: 1m
@@ -1457,7 +1457,7 @@ spec:
     kind: GitRepository
     name: gitops-flux-workshop
   dependsOn:
-    - name: dev-namespaces
+    - name: namespaces-dev
   decryption:
     provider: sops
     secretRef:
@@ -1490,7 +1490,7 @@ spec:
   * `spec.sourceRef.name`
     * selects `GitRepository/gitops-flux-workshop`
   * `spec.dependsOn[].name`
-    * waits for `dev-namespaces` to be ready
+    * waits for `namespaces-dev` to be ready
   * `spec.decryption.provider`
     * enables SOPS
   * `spec.decryption.secretRef.name`
@@ -1504,7 +1504,7 @@ spec:
 
 * rule
   * `spec.path` starts at the artifact root
-  * it does not start beside `clusters/dev/nginx.yaml`
+  * it does not start beside `clusters/dev/nginx-sync.yaml`
 * artifact path
 
 ```text
@@ -1534,7 +1534,7 @@ GitRepository artifact
 * relationship
 
 ```text
-clusters/dev/nginx.yaml
+clusters/dev/nginx-sync.yaml
   → sourceRef: GitRepository/gitops-flux-workshop
   → path: apps/nginx/overlays/dev
   → apps/nginx/overlays/dev/kustomization.yaml
@@ -1596,15 +1596,15 @@ resources:
   * a manual change to a managed field is replaced by the Git value
 * readiness
   * `wait: true` assesses all supported objects in the rendered output
-  * `dev-nginx` becomes ready after the nginx Deployment rollout succeeds
+  * `nginx-dev` becomes ready after the nginx Deployment rollout succeeds
 * timeout
   * one build, apply and health-check attempt may run for at most two minutes
 * retry
   * a failed attempt is retried after 20 seconds
   * successful reconciliation returns to the one-minute interval
 * dependency
-  * `dev-nginx` waits for `dev-namespaces`
-  * `prod-nginx` waits for `prod-namespaces`
+  * `nginx-dev` waits for `namespaces-dev`
+  * `nginx-prod` waits for `namespaces-prod`
   * dependencies order pipelines, not individual YAML files
   * circular dependencies never become ready
 * inventory
@@ -1615,8 +1615,8 @@ resources:
   * one pipeline does not prune another pipeline's inventory
 * pipeline ownership
   * the namespace and workload pipelines are separate
-  * pruning `dev-nginx` does not remove `nginx-dev`, which belongs to
-    `dev-namespaces`
+* pruning `Kustomization/nginx-dev` does not remove `Namespace/nginx-dev`,
+  which belongs to `Kustomization/namespaces-dev`
 
 ## SOPS decryption
 
@@ -1796,10 +1796,10 @@ kubectl -n flux-system get gitrepository gitops-flux-workshop \
 ### 5. Reconcile dev and prod
 
 ```bash
-flux reconcile kustomization dev-namespaces
-flux reconcile kustomization dev-nginx
-flux reconcile kustomization prod-namespaces
-flux reconcile kustomization prod-nginx
+flux reconcile kustomization namespaces-dev
+flux reconcile kustomization nginx-dev
+flux reconcile kustomization namespaces-prod
+flux reconcile kustomization nginx-prod
 flux get kustomizations
 ```
 
@@ -1860,7 +1860,7 @@ git add apps/nginx/overlays/dev/configmap.yaml
 git commit -m 'Update dev page'
 git push
 flux reconcile source git gitops-flux-workshop
-flux reconcile kustomization dev-nginx
+flux reconcile kustomization nginx-dev
 ```
 
 * with the dev port-forward running
@@ -1878,7 +1878,7 @@ done
 git revert --no-edit HEAD
 git push
 flux reconcile source git gitops-flux-workshop
-flux reconcile kustomization dev-nginx
+flux reconcile kustomization nginx-dev
 ```
 
 ### 9. Observe drift correction
@@ -1886,7 +1886,7 @@ flux reconcile kustomization dev-nginx
 ```bash
 kubectl -n nginx-dev scale deployment nginx --replicas=4
 kubectl -n nginx-dev get deployment nginx
-flux reconcile kustomization dev-nginx
+flux reconcile kustomization nginx-dev
 kubectl -n nginx-dev get deployment nginx
 ```
 
@@ -1897,10 +1897,10 @@ kubectl -n nginx-dev get deployment nginx
 ### 10. Observe failure, retry and dependency blocking
 
 ```bash
-kubectl -n flux-system patch kustomization dev-namespaces \
+kubectl -n flux-system patch kustomization namespaces-dev \
   --type=merge \
   --patch='{"spec":{"path":"./does-not-exist"}}'
-flux reconcile kustomization dev-namespaces
+flux reconcile kustomization namespaces-dev
 ```
 
 * expected failure
@@ -1908,23 +1908,23 @@ flux reconcile kustomization dev-namespaces
 * observe the 20-second retries
 
 ```bash
-kubectl -n flux-system get kustomization dev-namespaces --watch
+kubectl -n flux-system get kustomization namespaces-dev --watch
 ```
 
 ```bash
-flux events --for Kustomization/dev-namespaces
-flux reconcile kustomization dev-nginx
+flux events --for Kustomization/namespaces-dev
+flux reconcile kustomization nginx-dev
 ```
 
 * expected
-  * `dev-namespaces` is `Ready=False`
-  * `dev-nginx` reports that its dependency is not ready
+  * `namespaces-dev` is `Ready=False`
+  * `nginx-dev` reports that its dependency is not ready
 * restore the committed object
 
 ```bash
-kubectl apply -f clusters/dev/namespaces.yaml
-flux reconcile kustomization dev-namespaces
-flux reconcile kustomization dev-nginx
+kubectl apply -f clusters/dev/namespaces-sync.yaml
+flux reconcile kustomization namespaces-dev
+flux reconcile kustomization nginx-dev
 ```
 
 * expected
@@ -1942,7 +1942,7 @@ git add apps/nginx/overlays/dev/kustomization.yaml
 git commit -m 'Remove dev workshop secret'
 git push
 flux reconcile source git gitops-flux-workshop
-flux reconcile kustomization dev-nginx
+flux reconcile kustomization nginx-dev
 kubectl -n nginx-dev get secret nginx-workshop-secret
 ```
 
@@ -1955,7 +1955,7 @@ kubectl -n nginx-dev get secret nginx-workshop-secret
 git revert --no-edit HEAD
 git push
 flux reconcile source git gitops-flux-workshop
-flux reconcile kustomization dev-nginx
+flux reconcile kustomization nginx-dev
 kubectl -n nginx-dev get secret nginx-workshop-secret
 ```
 
@@ -1971,9 +1971,9 @@ flux check
 flux get sources git
 flux get kustomizations
 flux events --for GitRepository/gitops-flux-workshop
-flux events --for Kustomization/dev-nginx
-flux logs --kind=Kustomization --name=dev-nginx
-flux tree kustomization dev-nginx
+flux events --for Kustomization/nginx-dev
+flux logs --kind=Kustomization --name=nginx-dev
+flux tree kustomization nginx-dev
 kubectl -n nginx-dev get pods
 kubectl -n nginx-dev describe deployment nginx
 ```
