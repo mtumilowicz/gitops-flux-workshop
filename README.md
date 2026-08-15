@@ -938,98 +938,37 @@ spec:
      * commits and pushes the change to Git
   5. normal Flux reconciliation deploys the committed image version to the
      development environment
-* the image itself is stored in the container registry
-* only its reference, such as `ghcr.io/company/payment-api:2.4.1`, is committed
-  to Git
-* these controllers are not configured in this workshop
+* CI feedback loop
+  * problem
+    1. an application commit makes CI build and push `payment-api:2.4.2`
+    2. image-automation-controller commits `2.4.2` to the staging overlay
+    3. if CI builds an image after every commit, that automated commit builds
+       another image and the cycle repeats
+  * preferred mitigation: run the image-build workflow only when application or
+    build files change
+    * example
+        ```yaml
+        on:
+          push:
+            paths:
+              - "src/**"
+              - "build.gradle"
+        ```
+    * a commit changing only `gitops/**` does not match these paths
+    * Flux still notices and deploys the Git change
+  * alternative: make image-automation-controller add a CI skip instruction to
+    its commit message
 
-### Controller path used by this workshop
+    ```yaml
+    git:
+      commit:
+        messageTemplate: |
+          Update staging image
 
-* active Flux objects
-  * one `GitRepository`
-  * four Flux `Kustomization` objects: namespace and nginx reconciliation for
-    dev and prod
-* reconciliation path
-
-```text
-Git branch main
-  → source-controller resolves its current commit
-  → GitRepository.status.artifact identifies that fixed snapshot
-  → kustomize-controller downloads the snapshot
-  → each Flux Kustomization selects its spec.path
-  → Kustomize follows the resources and patches declared at that path
-  → encrypted Secrets are decrypted in memory
-  → final objects are applied through the Kubernetes API
-  → readiness, status and inventory are updated
-```
-
-* controller use
-  * source-controller and kustomize-controller perform the workshop deployment
-  * helm-controller is installed but receives no `HelmRelease`
-  * notification-controller is installed but receives no `Receiver`, `Provider`
-    or `Alert` configuration
-  * image controllers are not installed by `flux install` unless explicitly
-    requested
-* source trigger
-  * the workshop has no webhook Receiver
-  * source-controller discovers a new commit during its one-minute interval or
-    after a manual `flux reconcile source git` request
-  * a new artifact revision causes the referencing Flux `Kustomization` objects
-    to reconcile without waiting for their next drift-check interval
-
-## Installation versus bootstrap
-
-### Installation
-
-* workshop command
-
-```bash
-flux install
-```
-
-* result
-  * installs Flux CRDs, controllers, RBAC and network policies
-  * does not connect the cluster to this repository
-  * does not store the installation manifests in Git
-  * the workshop creates the source and reconciliation objects explicitly
-* use
-  * `flux install` is intended for development and testing
-  * current Flux guidance recommends bootstrap for long-lived installations
-
-### Bootstrap
-
-* corresponding GitHub command
-
-```bash
-flux bootstrap github \
-  --owner=mtumilowicz \
-  --repository=gitops-flux-workshop \
-  --branch=main \
-  --path=clusters \
-  --personal
-```
-
-* workshop restriction
-  * do not run this command during the workshop
-  * it would modify the repository
-* behavior
-  * installs or upgrades Flux
-  * configures Git authentication
-  * commits controller and synchronization manifests
-  * creates a `GitRepository` and root Flux `Kustomization`
-  * makes Flux manage its own installation from Git
-  * is idempotent
-* generated `flux-system` directory
-  * `gotk-components.yaml`
-    * Flux CRDs, controllers, RBAC and supporting resources
-  * `gotk-sync.yaml`
-    * bootstrap `GitRepository` and Flux `Kustomization`
-  * `kustomization.yaml`
-    * Kustomize entry point for both files
-* selection
-  * use installation for an isolated experiment
-  * use bootstrap when the cluster should be reproducible and Flux upgrades
-    should also follow Git
+          [skip ci]
+    ```
+    * when the automated commit contains `[skip ci]`, GitHub Actions skips workflows
+      that would be triggered by that commit through `push` or `pull_request`
 
 ## Repository structure
 
