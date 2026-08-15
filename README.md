@@ -49,7 +49,7 @@
 
 ### Warning
 
-* [`local-setup/workshop.agekey`](./local-setup/workshop.agekey)
+* [`sops-setup/workshop.agekey`](./sops-setup/workshop.agekey)
   * disposable private identity committed for reproducibility
   * provides no confidentiality
 * production private identities
@@ -404,7 +404,7 @@ Use the existing nested-bullet style:
           sourceRef: # use the artifact produced by this source
             kind: GitRepository 
             name: application-config
-          path: ./clusters/production # process files under this path inside that artifact
+          path: ./apps/application/overlays/production # process files under this path inside that artifact
           prune: true
         ```
 * rules used to select a commit
@@ -451,7 +451,7 @@ Use the existing nested-bullet style:
   * plain Kubernetes or Kustomize configuration
 * example:
   1. CI packages the Kubernetes YAML and Kustomize files from
-    `clusters/production`
+    `apps/application/overlays/production`
   1. CI pushes the package to
     `oci://ghcr.io/company/cluster-config:v2.4.1`
   1. Flux uses an `OCIRepository` to download that package
@@ -593,7 +593,7 @@ Use the existing nested-bullet style:
           provider: aws
           endpoint: s3.amazonaws.com
           bucketName: company-config
-          prefix: clusters/production/ # optional key prefix
+          prefix: configuration/production/ # optional key prefix
         ```
      * calculates one revision checksum from that list
      * compares it with the revision stored in `Bucket.status.artifact.revision`
@@ -970,310 +970,6 @@ spec:
     * when the automated commit contains `[skip ci]`, GitHub Actions skips workflows
       that would be triggered by that commit through `push` or `pull_request`
 
-## Repository structure
-
-* layout
-
-```text
-.
-├── .gitignore                                  # ignores local IDE and OS files
-├── .sops.yaml                                  # local encryption policy and public age recipient
-├── .sourceignore                               # excludes local-setup from the source artifact
-├── README.md                                   # workshop guide
-├── local-setup/
-│   ├── kustomization.yaml                      # generates Secret/sops-age in flux-system
-│   └── workshop.agekey                         # disposable private age identity
-├── apps/nginx/
-│   ├── base/
-│   │   ├── deployment.yaml                     # shared nginx Deployment
-│   │   ├── service.yaml                        # shared nginx Service
-│   │   └── kustomization.yaml                  # shared Kustomize entry point
-│   └── overlays/
-│       ├── dev/
-│       │   ├── configmap.yaml                  # dev index.html
-│       │   ├── deployment-patch.yaml           # one replica
-│       │   ├── secret.enc.yaml                 # encrypted dummy dev Secret
-│       │   └── kustomization.yaml              # renders the dev workload
-│       └── prod/
-│           ├── configmap.yaml                  # prod index.html
-│           ├── deployment-patch.yaml           # two replicas
-│           ├── secret.enc.yaml                 # encrypted dummy prod Secret
-│           └── kustomization.yaml              # renders the prod workload
-├── infrastructure/namespaces/
-│   ├── dev/
-│   │   ├── namespace.yaml                      # Namespace/nginx-dev
-│   │   └── kustomization.yaml                  # renders the dev namespace
-│   └── prod/
-│       ├── namespace.yaml                      # Namespace/nginx-prod
-│       └── kustomization.yaml                  # renders the prod namespace
-└── clusters/
-    ├── source.yaml                             # shared GitRepository
-    ├── kustomization.yaml                      # local entry point for all Flux objects
-    ├── dev/
-    │   ├── namespaces-sync.yaml                # Flux Kustomization for the dev namespace
-    │   ├── nginx-sync.yaml                     # Flux Kustomization for the dev workload
-    │   └── kustomization.yaml                  # groups both dev Flux objects
-    └── prod/
-        ├── namespaces-sync.yaml                # Flux Kustomization for the prod namespace
-        ├── nginx-sync.yaml                     # Flux Kustomization for the prod workload
-        └── kustomization.yaml                  # groups both prod Flux objects
-```
-
-* environment model
-  * Docker Desktop supplies one physical cluster
-  * `dev` and `prod` are logical environments in separate namespaces
-* directory names
-  * `apps`, `infrastructure`, `clusters`, `base`, `overlays`, `dev` and `prod`
-    are conventions
-  * Flux requires valid API objects, references and artifact paths
-  * Flux does not require these names
-* common repository structures
-  * monorepo
-    * applications, infrastructure and environments in one repository
-  * repository per cluster
-    * strong cluster ownership
-    * more shared-content coordination
-  * application source plus deployment repository
-    * separates builds from promotion
-  * repository per team
-    * clear ownership
-    * more sources and credentials to operate
-* workshop selection
-  * uses a monorepo
-  * one commit can show the complete source, environment and reconciliation
-    relationship
-
-## `GitRepository` and source artifacts
-
-* definition
-  * [`clusters/source.yaml`](./clusters/source.yaml) defines one source for both
-    environments
-* configuration
-
-```yaml
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: GitRepository
-metadata:
-  name: gitops-flux-workshop
-  namespace: flux-system
-spec:
-  interval: 1m
-  url: https://github.com/mtumilowicz/gitops-flux-workshop.git
-  ref:
-    branch: main
-```
-
-* fields
-  * `apiVersion`
-    * selects the stable Source API
-  * `kind`
-    * selects the `GitRepository` resource
-  * `metadata.name`
-    * identifies the source
-  * `metadata.namespace`
-    * determines its namespace and reference scope
-  * `spec.interval`
-    * schedules Git checks
-  * `spec.url`
-    * identifies the remote repository
-  * `spec.ref.branch`
-    * resolves the tip of `main`
-* successful `source-controller` reconciliation
-  1. resolves the configured reference to a commit
-  2. applies default exclusions and `.sourceignore`
-  3. archives the remaining content
-  4. publishes the artifact inside the cluster
-  5. reports revision, digest, size and URL in `.status.artifact`
-* artifact identity
-  * the revision identifies the Git input
-  * the digest identifies the produced artifact content
-  * they are different because files may be excluded
-
-## Flux `Kustomization`
-
-* definition
-  * [`clusters/dev/nginx-sync.yaml`](./clusters/dev/nginx-sync.yaml) defines the dev
-    reconciliation pipeline
-* configuration
-
-```yaml
-apiVersion: kustomize.toolkit.fluxcd.io/v1
-kind: Kustomization
-metadata:
-  name: nginx-dev
-  namespace: flux-system
-spec:
-  interval: 1m
-  retryInterval: 20s
-  timeout: 2m
-  path: ./apps/nginx/overlays/dev
-  prune: true
-  wait: true
-  sourceRef:
-    kind: GitRepository
-    name: gitops-flux-workshop
-  dependsOn:
-    - name: namespaces-dev
-  decryption:
-    provider: sops
-    secretRef:
-      name: sops-age
-```
-
-* fields
-  * `apiVersion`
-    * selects the stable Flux Kustomize API
-  * `kind`
-    * selects the Flux `Kustomization` resource
-  * `metadata.name`
-    * identifies this pipeline
-  * `metadata.namespace`
-    * places it in `flux-system`
-  * `spec.interval`
-    * schedules successful reconciliation approximately every minute
-  * `spec.retryInterval`
-    * retries failures after 20 seconds
-  * `spec.timeout`
-    * limits build, apply and health-check operations to two minutes
-  * `spec.path`
-    * selects a directory in the source artifact
-  * `spec.prune`
-    * enables deletion of objects removed from desired state
-  * `spec.wait`
-    * checks all reconciled resources for readiness
-  * `spec.sourceRef.kind`
-    * selects the source type
-  * `spec.sourceRef.name`
-    * selects `GitRepository/gitops-flux-workshop`
-  * `spec.dependsOn[].name`
-    * waits for `namespaces-dev` to be ready
-  * `spec.decryption.provider`
-    * enables SOPS
-  * `spec.decryption.secretRef.name`
-    * selects `Secret/sops-age`
-* source namespace
-  * `sourceRef.namespace` is omitted
-  * Flux therefore looks for the source in the Flux `Kustomization` namespace,
-    `flux-system`
-
-### Artifact-relative path
-
-* rule
-  * `spec.path` starts at the artifact root
-  * it does not start beside `clusters/dev/nginx-sync.yaml`
-* artifact path
-
-```text
-GitRepository artifact
-└── apps/nginx/overlays/dev
-    └── kustomization.yaml
-```
-
-* result
-  * `./apps/nginx/overlays/dev` is valid
-  * `./overlays/dev` is not
-
-### Flux `Kustomization` versus Kustomize
-
-* Flux `Kustomization`
-  * Kubernetes custom resource
-  * read by `kustomize-controller`
-  * selects a source artifact and path
-  * reconciles continuously
-  * supports readiness, retry, dependency, decryption and pruning
-* Kustomize `kustomization.yaml`
-  * Kustomize build instructions
-  * read by Kustomize
-  * selects resources, generators and patches
-  * renders once per invocation
-  * does not manage runtime state
-* relationship
-
-```text
-clusters/dev/nginx-sync.yaml
-  → sourceRef: GitRepository/gitops-flux-workshop
-  → path: apps/nginx/overlays/dev
-  → apps/nginx/overlays/dev/kustomization.yaml
-  → nginx-dev resources
-```
-
-### How the dev overlay is built
-
-* resource discovery
-  * this overlay has a `kustomization.yaml`, so Kustomize does not automatically
-    load every YAML file in the directory
-  * a `resources` list explicitly defines the files and Kustomize directories
-    that participate in the build
-* dev overlay resources
-
-```yaml
-resources:
-  - ../../base
-  - configmap.yaml
-  - secret.enc.yaml
-```
-
-* build process
-  1. Kustomize follows `../../base` and opens
-     `apps/nginx/base/kustomization.yaml`.
-  2. The base registers `deployment.yaml` and `service.yaml` under `resources`.
-  3. Kustomize loads the objects declared in those files:
-     `Deployment/nginx` and `Service/nginx`.
-  4. Kustomize returns to the dev overlay and loads `ConfigMap/nginx-index` and
-     `Secret/nginx-workshop-secret`.
-  5. The overlay registers `deployment-patch.yaml` under `patches`.
-  6. Kustomize reads the patch identity:
-
-     ```yaml
-     apiVersion: apps/v1
-     kind: Deployment
-     metadata:
-       name: nginx
-     ```
-
-  7. Kustomize finds the loaded resource with the same API version, kind and
-     name: `apps/v1 Deployment/nginx`.
-  8. It merges `spec.replicas: 1` into that Deployment. Other Deployments are not
-     selected.
-  9. It assigns `nginx-dev` to namespaced resources and renders the final YAML.
-* resource identity
-  * filenames do not identify Kubernetes resources
-  * `deployment.yaml` and `deployment-patch.yaml` could be renamed if their
-    `kustomization.yaml` references were updated
-  * patch matching comes from `apiVersion`, `kind` and `metadata.name` inside
-    the YAML
-
-## Reconciliation behavior
-
-* reconciliation
-  * runs after a relevant source revision event or the configured interval
-  * applies desired fields with server-side apply
-* drift correction
-  * a manual change to a managed field is replaced by the Git value
-* readiness
-  * `wait: true` assesses all supported objects in the rendered output
-  * `nginx-dev` becomes ready after the nginx Deployment rollout succeeds
-* timeout
-  * one build, apply and health-check attempt may run for at most two minutes
-* retry
-  * a failed attempt is retried after 20 seconds
-  * successful reconciliation returns to the one-minute interval
-* dependency
-  * `nginx-dev` waits for `namespaces-dev`
-  * `nginx-prod` waits for `namespaces-prod`
-  * dependencies order pipelines, not individual YAML files
-  * circular dependencies never become ready
-* inventory
-  * each Flux `Kustomization` records the objects it owns in `.status.inventory`
-* pruning
-  * with `prune: true`, an owned object removed from desired state is deleted
-  * deleting the Flux `Kustomization` also deletes its inventory by default
-  * one pipeline does not prune another pipeline's inventory
-* pipeline ownership
-  * the namespace and workload pipelines are separate
-* pruning `Kustomization/nginx-dev` does not remove `Namespace/nginx-dev`,
-  which belongs to `Kustomization/namespaces-dev`
-
 ## SOPS decryption
 
 * input
@@ -1358,28 +1054,6 @@ resources:
   * consider the required interface, cluster topology, tenancy boundary, secret
     workflow, Helm semantics, Git write-back and the team's operational experience
 
-## Security
-
-* Git trust
-  * repository write access can change cluster resources
-  * require review, branch protection and narrowly scoped credentials
-  * use Git signature verification where commit provenance is required
-* reconciliation authorization
-  * default installations favor convenience
-  * use `spec.serviceAccountName` and restricted RBAC for tenant workloads
-  * disable unnecessary cross-namespace references on shared clusters
-* secrets
-  * keep private SOPS identities and KMS credentials outside Git
-  * use separate keys and namespaces for separate trust boundaries
-* images
-  * use immutable digests for production provenance
-  * restrict registry access and image-automation Git writes
-* network
-  * restrict controller egress to required Git, registry, KMS and notification endpoints
-* deletion
-  * verify inventory ownership before enabling pruning
-  * protect resources that require an explicit retention policy
-
 ## Exercises
 
 * prerequisites
@@ -1416,7 +1090,7 @@ kubectl -n flux-system get deployments
 ### 3. Provide the age identity
 
 ```bash
-kubectl apply -k local-setup
+kubectl apply -k sops-setup
 kubectl -n flux-system get secret sops-age
 ```
 
@@ -1427,11 +1101,11 @@ kubectl -n flux-system get secret sops-age
 ### 4. Connect the source
 
 * when using a fork
-  * change `spec.url` in `clusters/source.yaml`
+  * change `spec.url` in `flux-setup/source.yaml`
   * commit and push before continuing
 
 ```bash
-kubectl apply -k clusters
+kubectl apply -k flux-setup
 flux reconcile source git gitops-flux-workshop
 ```
 
@@ -1507,7 +1181,7 @@ echo
 ### 8. Observe a Git change
 
 * prerequisite
-  * a writable remote configured in `clusters/source.yaml`
+  * a writable remote configured in `flux-setup/source.yaml`
 
 ```bash
 perl -pi -e 's/environment: dev/environment: dev-updated/' \
@@ -1578,7 +1252,7 @@ flux reconcile kustomization nginx-dev
 * restore the committed object
 
 ```bash
-kubectl apply -f clusters/dev/namespaces-sync.yaml
+kubectl apply -f flux-setup/dev/namespaces-sync.yaml
 flux reconcile kustomization namespaces-dev
 flux reconcile kustomization nginx-dev
 ```
@@ -1657,10 +1331,10 @@ kubectl -n nginx-dev describe deployment nginx
 ## Cleanup
 
 ```bash
-kubectl delete -k clusters
+kubectl delete -k flux-setup
 kubectl wait namespace/nginx-dev --for=delete --timeout=2m
 kubectl wait namespace/nginx-prod --for=delete --timeout=2m
-kubectl delete -k local-setup
+kubectl delete -k sops-setup
 ```
 
 * expected
