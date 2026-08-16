@@ -853,83 +853,100 @@ I will inspect the repository’s Flux manifests so the example matches the work
   * it is the fallback when GitHub cannot reach the cluster or a webhook is lost
   * a `Receiver` supplements polling; it does not replace it
 * example
-
-```yaml
-apiVersion: notification.toolkit.fluxcd.io/v1
-kind: Receiver
-metadata:
-  name: platform-github
-  namespace: flux-system
-spec:
-  type: github # selects GitHub payload parsing and HMAC signature verification
-  events:
-    - push # ignores other GitHub webhook event types
-  secretRef: # Kubernetes Secret in the `Receiver` namespace containing the webhook token
-    name: github-webhook-token # same token is configured as the GitHub webhook secret
-  resources: # objects to reconcile after an accepted request
-    - apiVersion: source.toolkit.fluxcd.io/v1
-      kind: GitRepository
-      name: platform-config
-```
-* digression: GitHub’s webhook protocol uses a shared secret and HMAC (Hash-based Message Authentication Code)
-    * advantages
-        * fast and simple
-        * each webhook has different secret
-    * GitHub
-        → calculates an HMAC signature of the request body using the token
-        → sends the signature in X-Hub-Signature
-    * notification-controller
-        → calculates the expected signature using the same token
-        → compares the signatures
+    ```yaml
+    apiVersion: notification.toolkit.fluxcd.io/v1
+    kind: Receiver
+    metadata:
+      name: platform-github
+      namespace: flux-system
+    spec:
+      type: github # selects GitHub payload parsing and HMAC signature verification
+      events:
+        - push # ignores other GitHub webhook event types
+      secretRef: # Kubernetes Secret in the `Receiver` namespace containing the webhook token
+        name: github-webhook-token # same token is configured as the GitHub webhook secret
+      resources: # objects to reconcile after an accepted request
+        - apiVersion: source.toolkit.fluxcd.io/v1
+          kind: GitRepository
+          name: platform-config
+    ```
+    * after applying it, notification-controller adds:
+      ```
+      status:
+        webhookPath: /hook/abc123...
+      ```
+* GitHub webhook authentication with HMAC (Hash-based Message Authentication Code)
+  * shared secret
+    * one random token is configured in GitHub webhook settings
+    * the same token is stored in the Kubernetes Secret referenced by
+      `Receiver.spec.secretRef`
+    * the token is not included in the webhook request
+        1. GitHub calculates an HMAC over the exact request body using the shared secret
+            * sends header: `X-Hub-Signature-256`: HMAC-SHA256
+        1. `notification-controller` calculates the expected HMAC from the received request body using the same shared secret
+            * rejects the request when the signatures differ
+            * when they match
+                1. reads the GitHub event type from the `X-GitHub-Event` header
+                   * example: `push`
+                2. checks whether it is listed in `Receiver.spec.events`
+                3. for an allowed event, requests reconciliation of the objects listed in
+                   `Receiver.spec.resources`
+  * why a shared secret is used
+    * HMAC is fast and simple for a direct relationship between GitHub and one
+      webhook receiver
+    * each webhook can use a different secret
+    * asymmetric signatures would additionally require public-key distribution,
+      selection and rotation
+    * trade-off: both GitHub and the receiver possess a secret capable of
+      producing a valid signature
 
 #### `Provider` and `Alert`: outbound notification
+* example
 
+  ```yaml
+  apiVersion: notification.toolkit.fluxcd.io/v1beta3 # Flux notification API
+  kind: Provider                                    # outbound destination configuration
+  metadata:
+    name: operations-slack                          # name referenced by Alert.spec.providerRef
+    namespace: flux-system                          # namespace containing Provider and its Secret
+  spec:
+    type: slack                                     # use the Slack notification integration
+    address: https://slack.com/api/chat.postMessage # Slack API endpoint
+    channel: operations                             # Slack channel receiving the messages
+    secretRef:                                      # Secret containing Slack authentication data
+      name: slack-bot-token
+  ---
+  apiVersion: notification.toolkit.fluxcd.io/v1beta3 # Flux notification API
+  kind: Alert                                       # rule selecting events to send
+  metadata:
+    name: production-errors                         # name of this event-selection rule
+    namespace: flux-system                          # namespace containing the referenced objects
+  spec:
+    providerRef:                                    # Provider used to deliver matching events
+      name: operations-slack
+    eventSeverity: error                            # send only events with error severity
+    eventSources:                                   # Flux objects whose events are considered
+      - kind: Kustomization                         # watch events from a Flux Kustomization
+        name: nginx-prod                            # select Kustomization/nginx-prod
+  ```
 * [`Provider`](https://fluxcd.io/flux/components/notification/providers/)
-  * destination and authentication configuration
-  * a Slack Provider is a Flux `Provider` object with `spec.type: slack`
+  * tells `notification-controller` where and how to send an outbound notification
+  * defines:
+    * destination type
+      * example: Slack
+    * destination address
+      * example: Slack API endpoint
+    * destination within that system
+      * example: Slack channel
+    * authentication Secret
+      * example: Slack bot token
+  * does not select which Flux events should be sent
+    * event selection is configured by an `Alert`
+  * example: a Slack Provider is a Flux `Provider` object with
+    `spec.type: slack`
   * it does not install Slack or create a workspace, app or channel
 * [`Alert`](https://fluxcd.io/flux/components/notification/alerts/)
   * rule connecting selected Flux events to one Provider
-  * selects involved objects and severity; optional rules can filter messages
-* Slack error example
-
-```yaml
-apiVersion: notification.toolkit.fluxcd.io/v1beta3
-kind: Provider
-metadata:
-  name: operations-slack
-  namespace: flux-system
-spec:
-  type: slack
-  address: https://slack.com/api/chat.postMessage
-  channel: operations
-  secretRef:
-    name: slack-bot-token
----
-apiVersion: notification.toolkit.fluxcd.io/v1beta3
-kind: Alert
-metadata:
-  name: production-errors
-  namespace: flux-system
-spec:
-  providerRef:
-    name: operations-slack
-  eventSeverity: error
-  eventSources:
-    - kind: Kustomization
-      name: nginx-prod
-```
-
-* flow
-  1. `kustomize-controller` encounters an error while reconciling
-     `Kustomization/nginx-prod`.
-  2. It sends a Flux event containing the involved object, severity, reason,
-     message and source revision to notification-controller's event API.
-  3. `Alert/production-errors` matches that object and `error` severity.
-  4. The Alert references `Provider/operations-slack` in the same namespace.
-  5. The Provider supplies the Slack API address, channel and Secret containing
-     the bot token.
-  6. notification-controller formats and sends the Slack message.
 
 ### Image controllers
 
