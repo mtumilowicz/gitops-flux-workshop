@@ -1089,23 +1089,13 @@ spec:
 
 * case study: failing `HelmRelease`
   * `False` does not always mean failure
-    * `Ready=False` means that the release is not ready
-    * `Drifted=False` with reason `NoDriftDetected` is healthy
-    * always read the condition's `type`, `reason` and `message`
-  * print every condition
-
-    ```bash
-    kubectl -n <release-namespace> get helmrelease <release-name> \
-      -o jsonpath='{range .status.conditions[*]}{.type}={.status}{" reason="}{.reason}{" message="}{.message}{"\n"}{end}'
-    ```
-
-    * example result
-
-      ```text
-      Ready=False reason=InstallFailed message=Helm install failed: ...
-      Released=False reason=InstallFailed message=Helm install failed: ...
-      ```
-
+  * `False` is meaningful only together with the condition type
+    * `Ready=True`: release successfully reconciled
+    * `Ready=False`: release is not successfully reconciled
+      * `InstallFailed`, `UpgradeFailed` or `TestFailed`: Helm operation failed
+      * message mentioning an unready `HelmChart`: release is blocked by its chart
+    * `Reconciling=True`: another attempt is currently running
+    * `Drifted=False`: healthy; no drift was found
   * inspect the release
 
     ```bash
@@ -1119,16 +1109,46 @@ spec:
     * the first command summarizes readiness, chart revision and the latest message
     * events and logs show the failed install, upgrade, test or remediation
   * if the message says that a `HelmChart` is not ready, inspect the source chain
+    * Helm cannot install the release until both inputs are ready
 
-    ```bash
-    flux get sources chart -A
-    flux get sources helm -A
-    ```
+      ```text
+      HelmRepository index.yaml
+        → HelmChart .tgz package
+        → HelmRelease installation
+      ```
 
-    * `HelmRepository Ready=False`: check its URL, authentication and `index.yaml`
-    * `HelmChart Ready=False`: check the requested chart name, version and download
-    * both sources ready: inspect the `HelmRelease` events and the named Kubernetes
-      resource; the failure is in rendering, installation, testing or readiness
+    1. check whether Flux downloaded the repository index
+
+       ```bash
+       flux get sources helm -A
+       ```
+
+       * shortened failure result
+
+         ```text
+         NAME               READY   MESSAGE
+         <repository-name>  False   failed to fetch Helm repository: ...
+         ```
+
+       * `Ready=False`: Flux cannot read `index.yaml`; check the URL,
+         authentication and network
+    2. check whether Flux downloaded the selected chart package
+
+       ```bash
+       flux get sources chart -A
+       ```
+
+       * shortened failure result
+
+         ```text
+         NAME          READY   MESSAGE
+         <chart-name>  False   no chart version found for <chart>-<version>
+         ```
+
+       * `Ready=False`: check the chart name, requested version and download URL
+    3. if both are `Ready=True`, the chart source is working
+       * inspect the `HelmRelease` events and logs for an install, upgrade, test or
+         workload-readiness failure
   * recreate a failed initial installation when its earlier logs are unavailable
     1. preserve the current conditions and events before deleting the object
 
