@@ -1070,8 +1070,6 @@ spec:
     * `--since=10m` does not guarantee ten minutes of logs
         * logs from that period may already have been rotated or lost
 * inspect one object
-  * replace `<namespace>`, `<kind>` and `<name>` before running the commands
-
   ```bash
   kubectl -n <namespace> describe <kind> <name>
   flux events --for <kind>/<name> -n <namespace>
@@ -1089,82 +1087,78 @@ spec:
 
   * `flux tree`: shows Kubernetes objects managed by that Flux `Kustomization`
 
-### `HelmRelease` reports a false condition
+* case study: failing `HelmRelease`
+  * `False` does not always mean failure
+    * `Ready=False` means that the release is not ready
+    * `Drifted=False` with reason `NoDriftDetected` is healthy
+    * always read the condition's `type`, `reason` and `message`
+  * print every condition
 
-* general example; this workshop does not create a `HelmRelease`
-* `False` does not always mean failure
-  * `Ready=False` means that the release is not ready
-  * `Drifted=False` with reason `NoDriftDetected` is healthy
-  * always read the condition's `type`, `reason` and `message`
-* print every condition
-  * replace `<release-namespace>` and `<release-name>` before running the command
-
-  ```bash
-  kubectl -n <release-namespace> get helmrelease <release-name> \
-    -o jsonpath='{range .status.conditions[*]}{.type}={.status}{" reason="}{.reason}{" message="}{.message}{"\n"}{end}'
-  ```
-
-  * example result
-
-    ```text
-    Ready=False reason=InstallFailed message=Helm install failed: ...
-    Released=False reason=InstallFailed message=Helm install failed: ...
+    ```bash
+    kubectl -n <release-namespace> get helmrelease <release-name> \
+      -o jsonpath='{range .status.conditions[*]}{.type}={.status}{" reason="}{.reason}{" message="}{.message}{"\n"}{end}'
     ```
 
-* inspect the release
+    * example result
 
-  ```bash
-  flux get helmreleases -A --show-source
-  flux events --for HelmRelease/<release-name> -n <release-namespace>
-  flux logs --kind=HelmRelease --name=<release-name> \
-    --namespace=<release-namespace> --since=10m
-  kubectl -n <release-namespace> describe helmrelease <release-name>
-  ```
+      ```text
+      Ready=False reason=InstallFailed message=Helm install failed: ...
+      Released=False reason=InstallFailed message=Helm install failed: ...
+      ```
 
-  * the first command summarizes readiness, chart revision and the latest message
-  * events and logs show the failed install, upgrade, test or remediation
-  * `kubectl describe` also shows conditions and recent events together
-* if the message says that a `HelmChart` is not ready, inspect the source chain
+  * inspect the release
 
-  ```bash
-  flux get sources chart -A
-  flux get sources helm -A
-  ```
+    ```bash
+    flux get helmreleases -A --show-source
+    flux events --for HelmRelease/<release-name> -n <release-namespace>
+    flux logs --kind=HelmRelease --name=<release-name> \
+      --namespace=<release-namespace> --since=10m
+    kubectl -n <release-namespace> describe helmrelease <release-name>
+    ```
 
-  * `HelmRepository Ready=False`: check its URL, authentication and `index.yaml`
-  * `HelmChart Ready=False`: check the requested chart name, version and download
-  * both sources ready: inspect the `HelmRelease` events and the named Kubernetes
-    resource; the failure is in rendering, installation, testing or readiness
-* recreate a failed initial installation when its earlier logs are unavailable
-  1. preserve the current conditions and events before deleting the object
+    * the first command summarizes readiness, chart revision and the latest message
+    * events and logs show the failed install, upgrade, test or remediation
+  * if the message says that a `HelmChart` is not ready, inspect the source chain
 
-     ```bash
-     kubectl -n <release-namespace> describe helmrelease <release-name>
-     flux events --for HelmRelease/<release-name> -n <release-namespace>
-     ```
+    ```bash
+    flux get sources chart -A
+    flux get sources helm -A
+    ```
 
-  2. follow new reconciliation logs in terminal one
+    * `HelmRepository Ready=False`: check its URL, authentication and `index.yaml`
+    * `HelmChart Ready=False`: check the requested chart name, version and download
+    * both sources ready: inspect the `HelmRelease` events and the named Kubernetes
+      resource; the failure is in rendering, installation, testing or readiness
+  * recreate a failed initial installation when its earlier logs are unavailable
+    1. preserve the current conditions and events before deleting the object
 
-     ```bash
-     flux logs --kind=HelmRelease --name=<release-name> \
-       --namespace=<release-namespace> --follow
-     ```
+       ```bash
+       kubectl -n <release-namespace> describe helmrelease <release-name>
+       flux events --for HelmRelease/<release-name> -n <release-namespace>
+       ```
 
-  3. delete the failed object in terminal two
+    2. follow new reconciliation logs in terminal one
 
-     ```bash
-     kubectl -n <release-namespace> delete helmrelease <release-name>
-     ```
+       ```bash
+       flux logs --kind=HelmRelease --name=<release-name> \
+         --namespace=<release-namespace> --follow
+       ```
 
-  4. reconcile the Flux `Kustomization` that manages it
+    3. delete the failed object in terminal two
 
-     ```bash
-     flux reconcile kustomization <kustomization-name> \
-       --namespace=<kustomization-namespace> --with-source
-     ```
+       ```bash
+       kubectl -n <release-namespace> delete helmrelease <release-name>
+       ```
 
-  5. `kustomize-controller` recreates the `HelmRelease` from Git and
-     `helm-controller` performs a fresh installation
-  * use this only for a failed initial installation
-    * deleting a failed upgrade can uninstall a previous working release
+    4. reconcile the Flux `Kustomization` that manages it
+
+       ```bash
+       flux reconcile kustomization <kustomization-name> \
+         --namespace=<kustomization-namespace> --with-source
+       ```
+
+    5. `kustomize-controller` recreates the `HelmRelease` from Git and
+       `helm-controller` performs a fresh installation
+    * use this only for a failed initial installation
+      * deleting a failed upgrade can uninstall a previous working release
 * [Flux troubleshooting cheatsheet](https://fluxcd.io/flux/cheatsheets/troubleshooting/)
