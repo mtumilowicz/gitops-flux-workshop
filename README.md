@@ -949,18 +949,55 @@ I will inspect the repository’s Flux manifests so the example matches the work
   * rule connecting selected Flux events to one Provider
 
 ### Image controllers
-
+* example
+    ```yaml
+    kind: ImageRepository
+    metadata:
+      name: payment-api                         # referenced by ImagePolicy
+    spec:
+      image: ghcr.io/company/payment-api        # registry repository to scan
+      interval: 1m                              # scan frequency
+    ---
+    kind: ImagePolicy
+    metadata:
+      name: payment-api-dev                     # referenced by $imagepolicy marker
+    spec:
+      imageRepositoryRef:
+        name: payment-api                       # ImageRepository containing scanned tags
+      policy:
+        semver:
+          range: ">=2.0.0 <3.0.0"               # allowed tag versions
+    ---
+    kind: ImageUpdateAutomation
+    metadata:
+      name: payment-api-dev                     # Git update configuration
+    spec:
+      interval: 1m                              # update frequency
+      sourceRef:
+        kind: GitRepository
+        name: gitops-flux-workshop               # Git repository to modify
+      update:
+        path: ./apps/payment-api/overlays/dev    # directory containing marked fields
+      git:
+        commit:
+          author:
+            name: flux
+            email: flux@example.com
+        push:
+          branch: main                           # destination branch
+    ```
 * optional Flux components
   * useful when CI builds and pushes container images but does not update the
     deployment repository
   * automatically select an allowed image version and commit it to Git
   * unnecessary when CI already updates Git
 * example: development environment
-  1. Git contains a development Deployment using version `2.4.0`.
-
-     ```yaml
-     image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-dev"}
-     ```
+    1. Git contains a development Deployment using version `2.4.0`.
+    
+       ```yaml
+       image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-dev"}
+    * marker format: {"$imagepolicy": "<policy-namespace>:<policy-name>"}
+        * is a machine-readable marker for image-automation-controller
 
   2. CI builds and pushes new tags to the registry.
 
@@ -971,7 +1008,7 @@ I will inspect the repository’s Flux manifests so the example matches the work
      ```
 
   3. `image-reflector-controller`
-     * scans the registry using an `ImageRepository`
+     * queries the registry and caches its tags locally
      * applies an `ImagePolicy`, for example:
 
        ```yaml
@@ -981,11 +1018,26 @@ I will inspect the repository’s Flux manifests so the example matches the work
        ```
 
      * selects the highest permitted stable tag: `2.4.1`
+     * updates the existing ImagePolicy Kubernetes object
+        ```
+        status:
+          latestRef:
+            image: ghcr.io/company/payment-api
+            tag: 2.4.1
+        ```
      * does not update Git or Kubernetes
   4. `image-automation-controller`
-     * finds the marked image field in the development Deployment
-     * changes `payment-api:2.4.0` to `payment-api:2.4.1`
-     * commits and pushes the change to Git
+     * watches `ImagePolicy` changes and reconciles at the configured interval
+     * constructs a marker key from `ImagePolicy.metadata`:
+       `flux-system` + `:` + `payment-api-dev`
+       → `flux-system:payment-api-dev`
+     * scans `ImageUpdateAutomation.spec.update.path` for the matching marker:
+  
+       ```yaml
+       image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-dev"}
+       ```
+  
+     * replaces the marked value with `ImagePolicy.status.latestRef`
   5. normal Flux reconciliation deploys the committed image version to the
      development environment
 * CI feedback loop
@@ -1004,8 +1056,8 @@ I will inspect the repository’s Flux manifests so the example matches the work
               - "src/**"
               - "build.gradle"
         ```
-    * a commit changing only `gitops/**` does not match these paths
-    * Flux still notices and deploys the Git change
+        * => a commit changing only `gitops/**` does not match these paths
+            * but Flux still notices and applies the Git change
   * alternative: make image-automation-controller add a CI skip instruction to
     its commit message
 
@@ -1025,21 +1077,19 @@ I will inspect the repository’s Flux manifests so the example matches the work
 * input
   * Flux receives the encrypted files through the source artifact
 * reconciliation-time process
-  1. `kustomize-controller` reads `decryption.secretRef.name`
-  2. it loads `identity.agekey` from `Secret/sops-age` in `flux-system`
-  3. it decrypts the encrypted values in memory
-  4. it builds and applies a normal Kubernetes Secret
-* `.sops.yaml`
-  * supplies the public recipient when the local SOPS CLI creates or updates a
-    file
-  * Flux does not use it to decrypt an existing file
-  * decryption uses the encrypted file metadata and the private identity in the
-    Kubernetes Secret
-* protection boundary
-  * SOPS protects secret values stored in Git
-  * it does not authorize a deployment
-  * it does not protect plaintext already stored in Kubernetes
-  * it does not prove that a Git change is safe
+  1. `kustomize-controller` reads
+     `Kustomization.spec.decryption.secretRef.name`
+  2. it uses that name to load the Secret from the `Kustomization` namespace
+  3. for age, it reads Secret entries whose names end with `.agekey`
+  4. it decrypts the encrypted values in memory
+     * Flux does not read `.sops.yaml`
+     * `.sops.yaml` supplies encryption rules and public recipients when a file is
+       encrypted locally
+     * the encrypted file already contains the recipient metadata required for
+       decryption
+     * Flux combines that metadata with the private age key from the referenced
+       Secret
+  5. it builds and applies the resulting Kubernetes object
 
 ## Flux versus Argo CD
 
