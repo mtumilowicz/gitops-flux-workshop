@@ -1093,66 +1093,76 @@ I will inspect the repository’s Flux manifests so the example matches the work
 
 ## Flux versus Argo CD
 
-* shared concepts
-  * both implement pull-based continuous delivery for Kubernetes
-  * for Argo CD concepts already covered by its workshop, see
+* shared model
+  * both pull desired state and compare it with live Kubernetes resources
+  * the important difference is how they organize ownership and operations
+  * for the shared GitOps concepts, see
     [Argo CD](https://github.com/mtumilowicz/argoCD-workshop#argocd)
-* operating models
-  * differ between Flux and Argo CD
-* primary abstraction
-  * Flux: sources plus specialized reconciliation resources
-  * Argo CD: `Application`, `ApplicationSet` and `AppProject`
-* architecture
-  * Flux: composable Kubernetes controllers
-  * Argo CD: application controller, repository server, API server and integrated UI
-* built-in interface
-  * Flux: Kubernetes API and Flux CLI
-  * Argo CD: Kubernetes API, Argo CD API, CLI and web UI
-* installation lifecycle
-  * Flux: bootstrap can make Flux manage itself from Git
-  * Argo CD: installation followed by declarative application configuration
-* multi-cluster style
-  * Flux: commonly installed per cluster; remote reconciliation is also supported
-  * Argo CD: commonly centralizes registered clusters in one control plane
-* Kustomize
-  * Flux: reconciled by `kustomize-controller`
-  * Argo CD: rendered by the repository server for an `Application`
-* Helm
-  * Flux: `HelmRelease` manages Helm release operations
-  * Argo CD: Helm renders manifests; Argo CD manages application lifecycle
-* SOPS
-  * Flux: native decryption in `kustomize-controller`
-  * Argo CD: normally requires a plugin or separate secret solution
-* image updates
-  * Flux: official optional Flux image controllers write to Git
-  * Argo CD: normally uses the separate Argo CD Image Updater or another tool
-* notifications
-  * Flux: `Receiver`, `Alert` and `Provider` APIs
-  * Argo CD: integrated Argo CD Notifications
+* reconciliation unit
+  * Flux composes independent pipelines
+    * sources, infrastructure and workloads can have separate reconciliation,
+      dependencies and failure states
+    * fits platform repositories where cluster services must become ready before
+      applications
+    * there is no built-in object that presents the whole pipeline as one application
+  * Argo CD organizes delivery around an `Application`
+    * one object owns the desired resources, health, drift and synchronization history
+    * fits teams that deploy, inspect and operate software as application units
+    * infrastructure can be managed, but it must also be represented as applications
+* change control
+  * Flux normally applies a new source revision as soon as its reconciliation
+    pipeline observes it
+    * approval normally happens before merge, through the Git workflow
+    * suspending reconciliation stops the pipeline rather than creating a pending
+      synchronization for an operator to approve
+  * Argo CD separates comparison from synchronization
+    * an application can report `OutOfSync` while waiting for a manual sync
+    * automated sync, pruning and live-state self-healing are explicit policy choices
+    * fits environments where an operator must inspect a diff after merge and decide
+      when to deploy it
+* control-plane topology
+  * Flux is commonly installed in every target cluster
+    * each cluster reconciles independently and does not depend on a central CD service
+    * a controller failure affects its cluster, but fleet-wide inventory requires an
+      additional system
+  * Argo CD commonly registers many target clusters in one control plane
+    * operators get one inventory and operational interface for the fleet
+    * control-plane unavailability stops fleet reconciliation; compromise can expose
+      every cluster reachable with its registered credentials
 * tenancy
-  * Flux: Kubernetes RBAC, namespaces and service-account impersonation
-  * Argo CD: Argo CD RBAC and `AppProject` source, destination and resource
-    restrictions
-* visual operations
-  * Flux: no built-in Flux web UI
-  * Argo CD: built-in application topology, health, diff and synchronization UI
-* choose Flux when
-  * Kubernetes-native APIs and controller composition are preferred
-  * GitOps bootstrap and self-management are important
-  * native SOPS decryption is required
-  * image selection and Git write-back should use official Flux controllers
-  * teams prefer Kubernetes RBAC and CLI-driven operation
-  * explicit dependencies between reconciliation pipelines are useful
-* choose Argo CD when
-  * a central application inventory and web interface are primary requirements
-  * operators need visual health, diffs, history and synchronization controls
-  * `ApplicationSet` should generate applications across clusters or repositories
-  * `AppProject` is a good fit for application-level tenancy and policy
-  * a central control plane managing registered clusters matches the operating model
-* decision
-  * neither is universally better
-  * consider the required interface, cluster topology, tenancy boundary, secret
-    workflow, Helm semantics, Git write-back and the team's operational experience
+  * Flux delegates deployment authority through Kubernetes namespaces, RBAC and
+    service accounts
+    * fits a platform whose team and security boundaries already exist in Kubernetes
+    * each reconciliation can be limited to the permissions of its service account
+  * Argo CD delegates application authority through its own RBAC and `AppProject`
+    policies
+    * projects restrict allowed sources, destination clusters, namespaces and resource
+      kinds
+    * fits a central platform where users operate applications without direct access
+      to target clusters
+* fleet rollout
+  * Flux commonly stores desired state per cluster and promotes changes by changing
+    the relevant cluster paths or revisions
+    * fits clusters that may intentionally differ or be operated independently
+  * Argo CD can generate applications from cluster and repository data with
+    `ApplicationSet`
+    * fits centrally applying a standard application catalogue across many registered
+      clusters
+* operator workflow
+  * Flux exposes reconciliation through Kubernetes resources, events and logs
+    * fits operators who already diagnose systems through Kubernetes APIs and
+      observability tools
+  * Argo CD adds an application-focused API and web interface
+    * fits operators who need one place for application health, resource topology,
+      diffs, history and synchronization actions
+* choose Flux when the critical requirement is
+  * independent reconciliation inside each cluster
+  * one delivery model for both platform infrastructure and workloads
+  * authorization that follows existing Kubernetes tenancy boundaries
+* choose Argo CD when the critical requirement is
+  * centralized inventory and operation of many applications or clusters
+  * manual synchronization or visual diff review after a Git change
+  * application operations for users who should not access target clusters directly
 
 ## Troubleshooting
 
