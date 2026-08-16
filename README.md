@@ -1088,14 +1088,35 @@ spec:
   * `flux tree`: shows Kubernetes objects managed by that Flux `Kustomization`
 
 * case study: failing `HelmRelease`
+  * example condition from `HelmRelease.status.conditions`
+
+    ```yaml
+    - type: Ready
+      status: "False"
+      reason: InstallFailed
+      message: Helm install failed because Deployment/payment-api was not ready
+    ```
+
   * `False` does not always mean failure
   * `False` is meaningful only together with the condition type
+  * interpretation
+    * `type: Ready`: reports whether the desired release is ready
+    * `status: "False"`: the desired release is failing or blocked
+    * `reason`: identifies the failure category
+    * `message`: identifies the concrete cause
+  * common conditions
     * `Ready=True`: release successfully reconciled
-    * `Ready=False`: release is not successfully reconciled
+    * `Ready=False`: release is failing or blocked
       * `InstallFailed`, `UpgradeFailed` or `TestFailed`: Helm operation failed
-      * message mentioning an unready `HelmChart`: release is blocked by its chart
+      * `RollbackFailed` or `UninstallFailed`: remediation failed
+      * message mentions an unready `HelmChart`: chart is unavailable
+      * message mentions a dependency: dependent `HelmRelease` is not ready
+      * message mentions `valuesFrom`: referenced `ConfigMap` or `Secret` is
+        missing or invalid
+      * other error in `message`: concrete rendering, validation, timeout or
+        Kubernetes resource failure
     * `Reconciling=True`: another attempt is currently running
-    * `Drifted=False`: healthy; no drift was found
+    * `Drifted=False`: no drift was found; this is healthy
   * inspect the release
 
     ```bash
