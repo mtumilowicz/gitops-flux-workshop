@@ -1,0 +1,3 @@
+# The private identity is committed only to make this workshop reproducible.
+# It is not needed in the source-controller artifact.
+/sops-setup/
