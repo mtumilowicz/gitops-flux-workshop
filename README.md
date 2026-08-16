@@ -1120,7 +1120,7 @@ spec:
   * inspect the release
 
     ```bash
-    flux get helmreleases -A --show-source
+    flux get helmreleases -A --status-selector ready=false --show-source
     flux events --for HelmRelease/<release-name> -n <release-namespace>
     flux logs --kind=HelmRelease --name=<release-name> \
       --namespace=<release-namespace> --since=10m
@@ -1141,7 +1141,7 @@ spec:
     1. check whether Flux downloaded the repository index
 
        ```bash
-       flux get sources helm -A
+       flux get sources helm -A --status-selector ready=false
        ```
 
        * shortened failure result
@@ -1156,7 +1156,7 @@ spec:
     2. check whether Flux downloaded the selected chart package
 
        ```bash
-       flux get sources chart -A
+       flux get sources chart -A --status-selector ready=false
        ```
 
        * shortened failure result
@@ -1166,10 +1166,22 @@ spec:
          <chart-name>  False   no chart version found for <chart>-<version>
          ```
 
-       * `Ready=False`: check the chart name, requested version and download URL
-    3. if both are `Ready=True`, the chart source is working
-       * inspect the `HelmRelease` events and logs for an install, upgrade, test or
-         workload-readiness failure
+       * inspect the failed `HelmChart`
+
+         ```bash
+         kubectl -n <chart-namespace> describe \
+           helmchart.source.toolkit.fluxcd.io <chart-name>
+         ```
+
+         * `Spec.Chart`: requested chart name
+         * `Spec.Version`: requested version
+         * `Spec.Source Ref`: referenced `HelmRepository`
+         * `Conditions` and `Events`: concrete failure
+       * common messages
+         * `no chart version found`: chart name or version is absent from
+           `index.yaml`
+         * `failed to download chart`: package URL, authentication or network failed
+         * `HelmRepository ... is not ready`: fix the repository first
   * recreate a failed initial installation when its earlier logs are unavailable
     1. preserve the current conditions and events before deleting the object
 
