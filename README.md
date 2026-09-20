@@ -84,37 +84,57 @@
     * auditability records what happened
     * reconciliation continuously restores the declared desired state
 * Flux reconciliation
+  * Kubernetes refresher
+    * a controller watches API objects for changes and also reconciles them on a
+      timer or retry
+    * during reconciliation, the controller reads the latest desired state,
+      inspects the current state, performs required changes and reports the result
   * convergence
     * creates or updates resources until the cluster matches Git
   * drift correction
     * changes done manually are restored
-  * deletion
-    * resources removed from desired state can be pruned
-  * auditability
-    * Git records who proposed and approved a change
-  * recovery
-    * a previous desired state can be restored with another Git commit
-* state
-  * Git records desired state
-  * Kubernetes status records current health and observed state
+  * pruning
+    * when `spec.prune: true`, Flux deletes managed objects removed from the
+      desired state
+* recovery through Git history
+  * restore a previous desired state with a new commit that reverts the change
 
 ## Kubernetes API model used by Flux
 
 * core idea
-  * Flux does not introduce a separate configuration database or deployment API
-  * it extends the Kubernetes API with new resource types and runs controllers
-    that act on objects of those types
+  * Flux uses the Kubernetes API for configuration and controller coordination
+  * installing Flux adds custom resource types such as `GitRepository`,
+    `Kustomization` and `HelmRelease`
+  * the Kubernetes API server stores objects of those types alongside built-in
+    objects such as `Deployment` and `Service`
+  * Flux controllers watch the custom objects and perform the requested work
+  * downloaded Git files and Helm charts are artifacts served by
+    `source-controller`; they are not stored inside the Kubernetes objects
 
 ### Manifest, object, `spec` and `status`
 
 * manifest
-  * YAML or JSON document sent to the Kubernetes API
+  * YAML or JSON document that describes an API object to create or update
   * example
     ```yaml
-    apiVersion: v1
-    kind: Namespace
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
-      name: nginx-dev
+      name: web
+      namespace: team-a
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: web
+      template:
+        metadata:
+          labels:
+            app: web
+        spec:
+          containers:
+            - name: web
+              image: httpd:2.4-alpine
     ```
 * standard fields
   * `apiVersion`
@@ -123,263 +143,186 @@
   * `kind`
     * selects a type in that API
     * example: `Deployment`
-  * `metadata.name` and `metadata.namespace`
-    * identify this particular object
-    * the full identity is API group, kind, namespace and name
-        * metadata.name may be repeated when the kind or namespace differs
+  * `metadata.name`
+    * identifies the object within its resource type and scope
+  * `metadata.namespace`
+    * is required for namespaced objects unless the client supplies a default
+    * is absent for cluster-scoped objects such as `Namespace`, `Node` and
+      `CustomResourceDefinition`
+    * use `kubectl api-resources --namespaced=true` and
+      `kubectl api-resources --namespaced=false` to inspect each category
+  * complete object identity
+    * API group, resource type, namespace when applicable, and name
   * `spec`
-    * specification supplied by the user
-    * example: a `Service` specification selects Pods and exposes port 80
+    * desired configuration supplied by an API client
+    * the client can be a person, `kubectl`, Flux or another controller
+    * example: a `Deployment` specification requests two replicas
       ```yaml
       spec:
-        selector:
-          app: nginx
-        ports:
-          - port: 80
+        replicas: 2
       ```
   * `status`
-    * report written by the controller after it tries to satisfy `spec`
-    * is stored on the Kubernetes object
-        * example: kubectl get namespace nginx-dev -o yaml
-            ```
-            apiVersion: v1
-            kind: Namespace
-            metadata:
-              name: nginx-dev
-            status: # <--- status
-              phase: Active
-            ```
+    * controller report about the observed state and the result of processing
+      `spec`
+    * the controller normally updates the object's `/status` API subresource
+    * the API server stores `status` as a field of the same object in the control
+      plane data store, normally etcd
+    * example: `kubectl get deployment web -n team-a -o yaml` returns both
+      `spec` and `status`
 * manifest vs object
-  * object: data stored in the Kubernetes API
+  * manifest: local or generated input sent to the Kubernetes API
+  * object: validated API data stored by the Kubernetes control plane
   * flow
-      1. `kubectl apply -f namespace.yaml` sends the YAML manifest to the API server
-      2. the API server validates it and stores `Namespace/nginx-dev`
-      3. the built-in namespace controller reconciles the stored object
-      4. Kubernetes reports the result in its `status`, for example
-         `status.phase: Active`
+      1. `kubectl apply -f deployment.yaml` sends the manifest to the API server
+      2. the API server validates and stores `Deployment/web` in namespace
+         `team-a`
+      3. the built-in Deployment controller creates or updates a `ReplicaSet`
+      4. the ReplicaSet controller creates or deletes Pods to reach two replicas
+      5. the controllers update the relevant objects' `status` fields
 * object vs workload
-  * workload = application running in Kubernetes Pods
-  * example:
-    * `Deployment/nginx` is an object
-    * the nginx Pods created from it are the workload
-  * objects such as `Namespace` and `Secret` do not create workloads
-* status channels
-  * `.status.conditions`
-    * many native Kubernetes objects use .status.conditions, but not all
-        * example
-            * Namespace uses .status.phase
-            * Job: Complete, Failed
-                ```yaml
-                status:
-                  conditions:
-                    - type: Complete
-                      status: "True"
-                ```
-            * Pod: Ready, PodScheduled, Initialized
-                * `Ready=True` means the latest observed configuration succeeded;
-                  `Ready=False` includes a reason and message
-  * generation tracking
-    * `.metadata.generation`
-      * updated by the API server when the desired configuration changes
-    * `.status.observedGeneration`
-      * updated later by the responsible controller
-      * identifies the generation described by the current `status`
-    * comparison
-      * equal values: the controller processed the current configuration
-      * different values: the reported status may describe an older configuration
-  * Kubernetes events
-    * timestamped diagnostic records associated with an object
-    * visible in `kubectl describe` or with `flux events`
-        * example: flux events -n specificNamespace
-  * controller logs
-    * detailed records written by the controller process
-    * visible with `flux logs` or `kubectl logs`
+  * API object: stored record such as a `Deployment`, `Namespace` or `Secret`
+  * workload: an application process running in Pods
+  * `Deployment/web` in namespace `team-a` is an API object; its Pods run the
+    workload
+  * not every object creates another object or starts a workload
+    * a `Namespace` provides scope for namespaced objects
+    * a `Secret` stores sensitive data for authorized clients and Pods
 
-### CRD, custom resource and controller
+### Status and diagnostics
 
-* built-in versus custom types
-  * Kubernetes already understands built-in types such as `Namespace`, `Service`
-    and `Secret`
-  * a CRD adds a type that Kubernetes does not provide
-* example: complete relationship
-```text
-ExternalSecret CRD
-  → registers the ExternalSecret API type
+* purpose
+  * show whether a controller has processed the current desired state
+  * report success, progress or failure
+* `.status.conditions`
+  * structured controller reports with fields such as `type`, `status`, `reason`
+    and `message`
+  * condition types depend on the resource
+    * examples: `Ready` on many Flux objects, `Complete` on a `Job`
+  * not every resource uses conditions; for example, a `Namespace` uses
+    `.status.phase`
+* determining whether `status` is current
+  * `.metadata.generation` changes when the desired configuration changes
+  * `.status.observedGeneration` identifies the generation processed by the
+    controller when the resource type provides this field
+  * example
+    ```yaml
+    metadata:
+      generation: 4
+    status:
+      observedGeneration: 3
+    ```
+    * the controller status still describes generation 3
+    * after the controller processes generation 4, it sets
+      `status.observedGeneration: 4`
+* Kubernetes Events
+  * separate, short-lived API objects associated with another object
+  * record notable controller activity; they are not fields inside that object
+  * `flux events` queries Kubernetes Events for Flux objects from the Kubernetes
+    API server
+  * example output
+    ```text
+    $ flux events --for Kustomization/web-prod -n flux-system
+    LAST SEEN  TYPE    REASON                   OBJECT                     MESSAGE
+    1m         Normal  ReconciliationSucceeded  Kustomization/web-prod     Applied revision: main@sha1:abc123
+    ```
+* controller logs
+  * detailed process output written by controller Pods
+  * not stored on the reconciled API object
+  * visible with `flux logs` or `kubectl logs`
 
-ExternalSecret/database-password
-  → requests one external value and one target Kubernetes Secret
+### Custom APIs and controllers
 
-external-secrets controller
-  → watches the ExternalSecret
-  → fetches the external value
-  → creates or updates Secret/database-password
-  → updates ExternalSecret.status
-```
 * CustomResourceDefinition (CRD)
-  * cluster-scoped Kubernetes object that registers a custom API type and its
-    validation schema
-  * defines whether objects of that type are namespaced or cluster-scoped
-  * stores no application data and implements no behavior
-  * without the CRD:
-    * the API server does not recognize the custom API type
-    * attempts to create objects of that type are rejected
-    * a controller may start, but attempts to list or watch that type fail
+  * cluster-scoped Kubernetes object that registers a custom API group, version,
+    resource type, schema and scope
+  * after the CRD is installed, the API server can validate and store objects of
+    that type
+  * provides storage and validation, but implements no controller behavior
 * custom resource
-  * one object of a type registered by a CRD
-  * stored and accessed through the Kubernetes API like a native object
-  * its `spec` describes the requested behavior
-  * its `status` can report the result
+  * one API object of a type registered by a CRD
+  * uses the Kubernetes API like a built-in object
 * custom controller
-  * program that implements the behavior requested by custom resources
-  * normally runs in a Pod managed by a native Kubernetes `Deployment`
-  * for each watched custom resource, it:
-    1. reads the requested state from `spec`
-    2. inspects the current state
-    3. performs the required operations
-    4. reports the result in `status`, events and logs
-  * without the controller:
-    * the API server can store and validate the custom resources
-    * nothing performs the behavior requested by their `spec`
-    * their controller-managed `status` is not updated
+  * program that watches API objects and implements their requested behavior
+  * normally runs in a Pod managed by a `Deployment`
+* Flux example
+  1. Flux installs the `GitRepository` CRD and the `source-controller`
+     Deployment
+  2. the CRD registers the `GitRepository` API type
+  3. `GitRepository/gitops-flux-workshop` in namespace `flux-system` requests one
+     Git source, branch and check interval
+  4. `source-controller` watches that object, fetches the repository and updates
+     its `status`
+* using existing CRDs
+  * many open-source projects provide ready-made CRDs and controllers
+  * their Helm chart or installation manifests normally install both
+  * examples include Flux, cert-manager and Prometheus Operator
+  * inspect the project's CRDs, controller images, RBAC and upgrade procedure
+    before installation
+* creating a custom API
+  * first check whether a built-in type or an established project already meets
+    the requirement
+  * if a new declarative API is required:
+    1. define the CRD schema, scope and supported versions
+    2. implement a controller that watches the custom resources
+    3. deploy the CRD, controller and required RBAC
+    4. test validation, reconciliation, upgrades and deletion behavior
 
-### Watch and reconciliation
+## Flux architecture
 
-* watch
-  * long-running subscription from a controller process to the Kubernetes API
-    server
-  * the controller's ServiceAccount requires RBAC permissions to `list` and
-    `watch` the selected resource type
-* reconciliation
-  1. an object's identity is added to the controller's work queue
-     * initial discovery when the controller starts
-     * creation, modification or deletion reported through an API watch
-     * change to a watched related object
-     * timer, retry or explicit request
-  2. a worker removes the identity from the queue
-  3. it reads the latest object
-     * if the object no longer exists, processing normally ends
-  4. it reads the desired configuration from `spec`
-  5. it inspects the relevant current state
-  6. it performs any required operations
-  7. it may update `status` and emit events or logs
-  8. the reconciliation returns one outcome:
-     * finished without requeueing
-        * future watch event or other external trigger can still enqueue the object
-     * request another reconciliation after a delay
-     * report a failure that may be retried
+* Flux controllers run inside Kubernetes
+* each controller watches specific Kubernetes API types
+* controllers coordinate through specific API objects and their fields
+  * example: a Flux `Kustomization.spec.sourceRef` identifies a `GitRepository`
+  * example: `GitRepository.status.artifact` identifies files produced by
+    `source-controller`
+* artifact files are not Kubernetes objects
+  * `source-controller` stores the files and serves them inside the cluster
+  * Kubernetes objects store the artifact revision, digest and download URL
 
-## Flux architecture and controllers
-* problem
-  * Git contains the desired state
-    * example: Kubernetes `Deployment`, `Service` and `ConfigMap` manifests
-  * after a commit, those manifests should appear in Kubernetes
-  * if someone changes the live objects manually, they should be restored to the
-    state declared in Git
-* solution
-  * use a reconciliation system that:
-    * reads the desired state from Git
-    * applies it to Kubernetes
-    * continuously compares desired and live state
-    * corrects detected drift
-  * Flux provides this reconciliation system
-* requirements
-  * process
-    1. watch the Git repository for changes
-       * in Flux, a `GitRepository` tells `source-controller` which repository and
-         revision to watch
-    2. download one exact revision
-       * `source-controller` resolves the configured revision to an exact commit
-         and downloads its files
-    3. package that revision as a fixed artifact
-       * `source-controller` publishes the artifact
-       * other controllers can use the exact same files without reading a moving
-         Git branch
-    4. define one or more reconciliation configurations
-       * each configuration selects a directory from the artifact
-       * in Flux, each configuration is a Flux `Kustomization`
-    5. build and apply the manifests selected by each configuration
-       * `kustomize-controller`:
-         * downloads the Git artifact
-         * builds the selected directory
-         * applies the resulting objects to the Kubernetes API
-       * for ordinary Kubernetes objects:
-         * built-in Kubernetes controllers create or update the workloads
-       * for an application distributed as a Helm chart:
-         1. Git must contain configuration that describes:
-            * where the chart is published
-              * in Flux, this is a `HelmRepository` or `OCIRepository`
-            * which chart and version to use and which values to apply
-              * in Flux, this is a `HelmRelease`
-         2. an apply component must create those configuration objects in
-            Kubernetes
-            * in Flux, `kustomize-controller` applies them
-         3. a component must obtain the selected chart, render its templates with the
-            configured values and install the resulting Kubernetes objects
-            * in Flux:
-              1. `helm-controller` reads the `HelmRelease`
-              2. `source-controller` provides the selected chart as an artifact
-              3. `helm-controller` renders the chart with the values from the
-                 `HelmRelease`
-              4. `helm-controller` installs or upgrades the resulting Kubernetes objects
-         4. a release component must combine the chart artifact with the release
-            values and manage the resulting installation
-            * in Flux, `helm-controller`:
-              * downloads the chart artifact
-              * reads the values from the `HelmRelease`
-              * renders the chart with those values
-              * installs or upgrades the resulting Kubernetes objects
-    6. repeat the process to detect changes and correct drift
-       * `source-controller` detects new Git revisions and chart versions
-       * `kustomize-controller` applies the new desired state and restores
-         manually changed objects
-       * `helm-controller` continuously reconciles each Helm release
-    * components
-      * source component
-        * watches Git
-        * resolves a branch, tag or version rule to an exact commit
-        * downloads the selected repository files
-        * packages them as an artifact
-        * in Flux, this is `source-controller`
-      * artifact
-        * fixed snapshot of the selected repository files
-        * prevents later stages from reading a moving Git branch at a different commit
-        * contains files; it is not a Kubernetes object or container image
-      * apply component
-        * reads the artifact
-        * selects the configured directory
-        * builds the manifests
-        * applies them to the Kubernetes API
-        * periodically repeats this work to correct drift
-        * in Flux, this is `kustomize-controller`
-      * Helm support
-        * many applications are distributed as Helm charts
-        * to deploy such an application, Git must contain manifests that specify:
-          * where the chart is published
-            * in Flux, this is a source object
-              * `HelmRepository` for an HTTP/S Helm repository
-              * `OCIRepository` for a chart published in an OCI registry
-            * `source-controller` downloads the repository metadata or chart artifact
-          * which chart and version to use and which values to apply
-            * in Flux, this is a `HelmRelease`
-        * `kustomize-controller` applies these objects to the Kubernetes API
-          * it does not perform Helm release operations
-          * it does not resolve the chart, combine it with values, or manage the Helm
-            release lifecycle
-        * Helm processing therefore requires another component
-          * in Flux, this is `helm-controller`
-          * `helm-controller` watches `HelmRelease` objects
-          * it obtains the selected chart artifact
-          * it renders the chart with the configured values
-          * it installs, upgrades and continuously reconciles the Helm release
-* architecture
-  * Flux consists of several controllers running inside Kubernetes
-  * each controller handles one part of the process
-    * in particular: no controller owns the complete process
-  * controllers communicate through objects stored in the Kubernetes API
-* notifications
-  * Flux controllers emit Kubernetes events
-  * `notification-controller` can forward selected events to systems such as
-    Slack or Microsoft Teams
+### Workshop flow: Git to Kubernetes
+
+1. `GitRepository/gitops-flux-workshop` in namespace `flux-system` specifies:
+   * repository URL
+   * `main` branch
+   * one-minute check interval
+2. `source-controller` checks the repository
+   * `branch: main` is a selection rule whose result can change
+   * for each check, the controller resolves that rule to the exact commit
+     currently referenced by `main`
+3. `source-controller` creates a compressed artifact for that commit
+   * the artifact contains the included repository files
+   * the controller stores the file and serves it through its in-cluster HTTP
+     service
+   * it records the commit, digest and URL in
+     `GitRepository.status.artifact`
+4. `Kustomization/nginx-dev` in namespace `flux-system` reads:
+   * `spec.sourceRef.name: gitops-flux-workshop` to select the source object
+   * `spec.path: ./apps/nginx/overlays/dev` to select a directory inside the
+     artifact
+5. `kustomize-controller` downloads and verifies the artifact
+6. `kustomize-controller` builds the selected directory
+   * “build” means resolve the Kustomize resources, generators and patches into
+     final Kubernetes manifests
+   * in this workshop, the dev overlay combines the nginx base, dev
+     `ConfigMap`, encrypted `Secret` and Deployment patch
+7. `kustomize-controller` compares desired and live objects
+   * it uses a server-side apply dry-run during periodic reconciliation
+   * if a managed field differs, it applies the desired value through the
+     Kubernetes API
+   * if nothing differs, repeated reconciliation causes no effective object
+     change
+   * because `spec.prune: true`, it deletes previously managed objects that are
+     absent from the build output
+8. built-in Kubernetes controllers process the applied objects
+   * example: the Deployment controller creates a ReplicaSet, and the ReplicaSet
+     controller creates the requested Pods
+9. Flux records the applied revision, inventory and conditions in
+   `Kustomization/nginx-dev.status`
+10. source changes, API watch events, intervals, retries and manual requests
+    trigger later reconciliations
+
+## Flux components
+
 * default installation
   * `source-controller`
   * `kustomize-controller`
@@ -392,29 +335,28 @@ external-secrets controller
 ### `source-controller`
 
 * purpose
-  * watches source objects, including `GitRepository`, `OCIRepository`,
-    `HelmRepository`, `HelmChart` and `Bucket`
-  * reads configuration packages (files) from systems outside Kubernetes
-    * example: Git repository
-  * creates an artifact: a fixed snapshot of the downloaded files
-    * in particular: does not apply application manifests or run Helm releases
+  * watches `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart` and
+    `Bucket` objects for configuration changes and reconciliation requests
+  * checks their external sources at the configured intervals
+  * downloads files from Git, Helm repositories, OCI registries or object storage
+  * stores the result as a fixed artifact and reports it in the source object's
+    `status`
+  * does not apply application manifests or manage Helm releases
 
 #### Artifact
 
-* file produced by a source reconciliation
-  * in particular: only source objects publish artifacts
-    * Flux `Kustomization` and `HelmRelease` objects consume artifacts
-  * examples: `.tar.gz` snapshot of Git files
-      * not a Kubernetes object and not a container image
+* file produced by `source-controller`
+  * example: `.tar.gz` snapshot of files from one Git commit
+  * not a Kubernetes object and not a container image
 * purpose
-  * prevents two controllers from independently reading a moving branch at
-    different commits
+  * gives downstream controllers an immutable set of files for one resolved
+    source revision
   * example
     * `main` is a moving Git branch
     * `main@sha1:abc123` identifies the branch at one exact commit
     * an artifact for that revision contains the selected repository files exactly
       as fetched and filtered for `abc123`
-* published through the source object's `.status.artifact`
+* storage and access
   * the artifact file is stored by `source-controller`
     * source-controller writes to the local path configured by `--storage-path`
     * the standard Flux installation mounts `/data` from an `emptyDir` volume
@@ -427,7 +369,8 @@ external-secrets controller
       * previous artifacts become eligible after one minute
       * both values are configurable controller flags; see
         [source-controller options](https://fluxcd.io/flux/components/source/options/)
-  * `.status.artifact` does not contain the file
+  * `source-controller` serves the file through its in-cluster HTTP Service
+  * the source object's `.status.artifact` does not contain the file
     * example
         ```yaml
         status:
@@ -437,8 +380,8 @@ external-secrets controller
             size: 18432
             url: http://source-controller.flux-system.svc.cluster.local./gitrepository/flux-system/gitops-flux-workshop/abc123.tar.gz
         ```
-    * it contains metadata that allows another controller to find and verify the
-      file:
+    * the field contains metadata that allows another controller to find and
+      verify the file:
       * `revision`: source revision represented by the artifact
       * `digest`: checksum used to verify the downloaded bytes
       * `size`: artifact size
@@ -450,114 +393,74 @@ external-secrets controller
 
 
 #### `GitRepository`
-* GitRepository = what Git repository and revision to download
-    * example
-        ```
-        apiVersion: source.toolkit.fluxcd.io/v1
-        kind: GitRepository
-        metadata:
-          name: application-config
-          namespace: flux-system
-        spec:
-          interval: 1m # how often to check it
-          url: https://github.com/company/application-config.git # which Git repository to read
-          ref: # rule used to select a commit
-            branch: main # means:aAt every check, use the commit currently pointed by main
-        ```
-* rules used to select a commit
-  * branch: select the commit currently at the end of the branch
-  * semantic-version range: select the highest matching tag, then its commit
-    * useful for automatically receiving new releases from one allowed major version
-    * example: range >=2.0.0 <3.0.0 
-  * tag: select the commit identified by that tag
-    * useful when Flux should deploy a named release instead of following every commit on a branch
-  * commit SHA: select that exact commit
-    * useful for an exact deployment, rollback or investigation
-  * all choices finally resolve to a commit
-    * branch main              → commit abc123
-    * tag v2.4.1               → commit abc123
-    * range >=2.0.0 <3.0.0     → tag v2.4.1 → commit abc123
-    * commit abc123            → commit abc123
-* flow
-  1. `GitRepository` specifies a Git URL, commit-selection rule and check interval
-  1. `source-controller` resolves the rule to an exact commit
-  1. for every new commit, it performs a new temporary Git checkout
-  1. it creates the artifact and removes the temporary checkout
+* specifies a Git URL, a commit-selection rule and a check interval
+* every selection rule resolves to one commit
+
+  | Rule | Result | Typical use |
+  |---|---|---|
+  | `branch: main` | Current commit referenced by `main` | Deploy every merged change. |
+  | `tag: v2.4.1` | Commit referenced by `v2.4.1` | Keep a cluster on one named release until Git changes the tag selection. |
+  | `semver: ">=2.0.0 <3.0.0"` | Commit referenced by the highest matching tag | Receive compatible releases automatically. |
+  | `commit: abc123...` | Exact commit | Pin an investigation or controlled rollback. |
+
+* a Git server can permit a tag to move; use a commit SHA when the selection must
+  remain exact without relying on tag-protection policy
+
+* example: production follows an explicitly selected release tag
+  ```yaml
+  apiVersion: source.toolkit.fluxcd.io/v1
+  kind: GitRepository
+  metadata:
+    name: production-config
+    namespace: flux-system
+  spec:
+    interval: 1m
+    url: https://github.com/company/platform-config.git
+    ref:
+      tag: v2.4.1
+  ```
+  * changing `spec.ref.tag` to `v2.4.2` in Git is an explicit production release
+    change
+* reconciliation
+  1. `source-controller` resolves the selection rule to a commit
+  2. it checks out that commit in temporary storage
+  3. it excludes files matched by `.sourceignore` or `spec.ignore`
+  4. it creates the artifact and removes the temporary checkout
 
 #### `HelmRepository`
 
-* vs `OCIRepository`
-  * both can provide Helm charts to Flux
-  * `HelmRepository`
-    * points to an HTTP/S chart repository
-    * reads `index.yaml` to find chart names, versions and download URLs
-  * `OCIRepository`
-    * points to a container registry
-    * selects a chart by tag, version range or digest
-    * does not use `index.yaml`
-  * use `HelmRepository` when charts are published on a traditional Helm
-    repository
-  * use `OCIRepository` when charts are published in an OCI registry
-The flow should follow the complete controller chain from Git to installation.
-
-* flow
-  * assumption
-    * a `HelmRepository` object is already configured as a Flux source
-    * it points to the HTTP/S Helm repository containing the required chart
-  1. `kustomize-controller` reads the `HelmRelease` manifest from the Git
-     artifact and applies it to the Kubernetes API
-  2. `source-controller` reconciles the `HelmRepository`
-     * downloads its `index.yaml`
-     * publishes `index.yaml` as the `HelmRepository` artifact
-  3. `helm-controller` notices the `HelmRelease`
-     * reads `HelmRelease.spec.chart`
-     * creates a `HelmChart` object containing:
-       * the referenced `HelmRepository`
-       * the requested chart name
-       * the requested chart version
-     * release values remain in the `HelmRelease`
-  4. `source-controller` reconciles the `HelmChart`
-     * reads the referenced `HelmRepository` artifact
-     * finds the requested chart and version in `index.yaml`
-     * downloads the chart package
-     * publishes the package as the `HelmChart` artifact
-     * if the requested chart or version is absent:
-       * no `HelmChart.status.artifact` is produced
-       * the `HelmChart` reports `Ready=False`
-       * the `HelmRelease` cannot continue
-  5. `helm-controller` continues reconciling the `HelmRelease`
-     * downloads the `HelmChart` artifact
-     * reads the values from the `HelmRelease`
-     * renders the chart templates with those values
-     * installs or upgrades the resulting Kubernetes objects
-     * updates `HelmRelease.status`
-  6. subsequent reconciliation detects:
-     * new chart versions
-     * changed `HelmRelease` values
-     * drift in the installed release
+* points to an HTTP/S Helm chart repository
+* `source-controller` downloads `index.yaml`
+  * the index maps chart names and versions to chart-package URLs and digests
+* rule of thumb
+  * use `HelmRepository` when the chart publisher exposes an HTTP/S repository
+    with `index.yaml`
+  * use `OCIRepository` when the publisher stores the chart in an OCI registry
+  * prefer the format already supported by the publisher and the organization's
+    authentication, signing and replication tools
+  * OCI also supports digest pinning without `index.yaml`
 
 #### `OCIRepository`
-* OCI = open standards for packaging and transferring images and artifacts
-    * example: Docker Hub supports OCI
-* the artifact can contain:
+* points to an artifact stored in an OCI-compatible registry
+* two distinct uses
+  * configuration artifact
+    * contains Kubernetes manifests or Kustomize files packaged by CI
+    * a Flux `Kustomization` can use it instead of a Git artifact
   * Helm chart
-  * plain Kubernetes or Kustomize configuration
-* example:
-  1. CI packages the Kubernetes YAML and Kustomize files from
-    `apps/application/overlays/production`
-  1. CI pushes the package to
-    `oci://ghcr.io/company/cluster-config:v2.4.1`
-  1. Flux uses an `OCIRepository` to download that package
-* less common than storing deployment configuration directly in Git
-* useful when CI packages configuration as a versioned release
-    * allows every cluster to download the same package by tag or digest
-* flow
-  1. `OCIRepository` specifies:
-     * OCI registry URL
-     * chart tag, version range or digest
-  2. `source-controller` downloads the selected Helm chart
-  3. it stores the chart as an artifact
-  4. `HelmRelease.spec.chartRef` refers to the `OCIRepository`
+    * contains one chart published with the Helm OCI media type
+    * `HelmRelease.spec.chartRef` can refer directly to it
+* use a configuration artifact when deployment files must move through existing
+  registry promotion, signing, retention or replication controls
+  * this is an alternative distribution path, not an inherent improvement over
+    Git
+* tags are mutable references; a digest identifies exact registry content
+* example flow for a Helm chart
+  1. the chart publisher pushes the chart to
+     `oci://ghcr.io/company/charts/webapp`
+  2. an `OCIRepository` selects a tag, semantic-version range or digest
+  3. `source-controller` downloads the selected registry content and exposes it
+     as an artifact
+  4. a `HelmRelease` refers to that artifact through `spec.chartRef`
 
 #### `Bucket`
 
@@ -577,488 +480,416 @@ The flow should follow the complete controller chain from Git to installation.
   │   └── kustomization.yaml
   └── documentation/
       └── README.md
-* use cases
-    * vendor publishes deployment files only through a bucket
-    * cluster can access S3 through cloud workload identity but cannot access Git
-* flow
+  ```
+* use when configuration is distributed through object storage
+  * example: the cluster can access S3 through cloud workload identity but
+    cannot access Git
+* change detection
   1. an external system uploads Kubernetes configuration files to an
      object-storage bucket
   2. a Flux `Bucket` object tells `source-controller`:
      * which storage service to access
      * which bucket to read
      * how often to check it
-  3. `source-controller` checks whether the included files changed
-     * asks the storage service for the included object keys and ETags
-        ```
-        spec:
-          provider: aws
-          endpoint: s3.amazonaws.com
-          bucketName: company-config
-          prefix: configuration/production/ # optional key prefix
-        ```
-     * calculates one revision checksum from that list
-     * compares it with the revision stored in `Bucket.status.artifact.revision`
-  4. when they changed, it:
-     * downloads all included files
-     * creates a compressed artifact
-     * records the artifact URL in `Bucket.status`
-  5. a Flux `Kustomization` can refer to the `Bucket` object
-
-I will inspect the repository’s Flux manifests so the example matches the workshop instead of using invented names.
+  3. `source-controller` lists the included objects
+     * an object key is its path, such as `manifests/deployment.yaml`
+     * an ETag is an opaque identifier returned for the current representation of
+       one object
+     * example listing
+       ```text
+       manifests/deployment.yaml  ETag "a1b2"
+       manifests/service.yaml     ETag "c3d4"
+       ```
+  4. `source-controller` hashes the ordered key-and-ETag list
+     * the resulting SHA-256 value represents the observed bucket contents
+  5. it compares that value with `Bucket.status.artifact.revision`
+     * equal values: keep the existing artifact; no file download is required
+     * different values: download the included objects and create a new compressed
+       artifact
+  6. it records the new revision, digest and artifact URL in `Bucket.status`
+  7. a Flux `Kustomization` can refer to the `Bucket` object
 
 ### `kustomize-controller`
-* example
+
+* watches Flux `Kustomization` objects for creation, specification changes,
+  source artifact changes, retry requests and reconciliation intervals
+* one Flux `Kustomization` defines one set of source files reconciled together
+  * it does not create a Flux `Kustomization` for every applied object
+  * the applied Deployments, Services and other objects keep their own Kubernetes
+    `status`
+* representative production overlay
   ```yaml
-  apiVersion: kustomize.toolkit.fluxcd.io/v1 # Flux Kustomization API
-  kind: Kustomization                       # object watched by kustomize-controller
+  apiVersion: kustomize.toolkit.fluxcd.io/v1
+  kind: Kustomization
   metadata:
-    name: nginx-dev                         # name of this reconciliation configuration
-    namespace: flux-system                  # namespace containing this Flux object
+    name: web-prod
+    namespace: flux-system
   spec:
-    interval: 1m                            # interval between successful reconciliations
-    retryInterval: 20s                      # interval between failed reconciliation attempts
-    timeout: 2m                             # maximum duration of one reconciliation
-    path: ./apps/nginx/overlays/dev         # directory inside the source artifact
-    prune: true                             # delete managed objects removed from Git
-    wait: true                              # wait for applied objects to become ready
-    sourceRef:                              # source object that publishes the artifact
-      kind: GitRepository                   # type of the referenced source object
-      name: gitops-flux-workshop            # name of the referenced source object
-    dependsOn:                              # reconcile only after these Kustomizations are ready
-      - name: namespaces-dev
-    decryption:                             # decrypt encrypted manifests before building them
-      provider: sops                        # use SOPS for decryption
-      secretRef:                            # Secret containing the decryption identity
-        name: sops-age
+    interval: 5m
+    retryInterval: 30s
+    path: ./apps/web/overlays/prod
+    prune: true
+    wait: true
+    sourceRef:
+      kind: GitRepository
+      name: platform-config
   ```
-* purpose
-    * turns files from one source artifact into final Kubernetes objects
-    * applies those objects and keeps them equal to the desired state
-    * does not compile source code or build container images
-    * watches Flux `Kustomization` objects
-      * Flux `Kustomization` versus Kustomize `kustomization.yaml`
-        * Flux [`Kustomization`](https://fluxcd.io/flux/components/kustomize/kustomizations/)
-          * Kubernetes API object with
-            `apiVersion: kustomize.toolkit.fluxcd.io/v1`
-          * tells `kustomize-controller`:
-            * which source artifact to use
-            * which directory within that artifact to reconcile
-            * how often to reconcile it
-            * whether to decrypt, wait and prune
-          * stored in the cluster
-          * its manifest is normally also committed to Git
-        * Kustomize `kustomization.yaml`
-          * file inside the selected source directory
-          * tells the Kustomize builder which resource files, directories, generators
-            and patches form the output
-          * not a Kubernetes API object sent to the cluster
-        * connection
-          1. Flux `Kustomization.spec.sourceRef` selects a source artifact
-          2. Flux `Kustomization.spec.path` selects a directory inside that artifact
-          3. `kustomize-controller` opens the selected directory
-          4. if the directory contains `kustomization.yaml`, the controller runs its
-             Kustomize build
-          5. if it does not contain `kustomization.yaml`, the controller automatically
-             generates one for the plain Kubernetes manifests under that directory
-          6. the controller applies the generated output to the Kubernetes API
-        * naming convention
-          * `kustomization.yaml`: Kustomize build file
-          * `<purpose>-sync.yaml`: manifest containing a Flux `Kustomization` object
-          * `<application>-<environment>`: suggested Flux
-            `Kustomization.metadata.name`    
-* flow
-  1. `kustomize-controller` reads `Kustomization/application`
-  2. it follows `Kustomization/application.spec.sourceRef` to
-     `GitRepository/application-config`
-  3. it reads `GitRepository/application-config.status.artifact`
-     * `revision`: source revision contained in the artifact
-     * `url`: location from which to download it
-     * `digest`: checksum used to verify it
-  4. it downloads the artifact through the in-cluster `source-controller`
-     Service
-     * periodic reconciliation also downloads an unchanged artifact
-     * this allows `kustomize-controller` to detect and correct live-cluster drift
-  5. it verifies the digest and extracts the artifact into temporary working
-     storage
-  6. it opens the directory selected by
-     `Kustomization/application.spec.path`
-  7. it creates the final Kubernetes manifests
-     * decrypts encrypted files when configured
-     * runs the Kustomize build
-     * performs configured variable substitutions
-  8. it validates and applies the resulting Kubernetes objects
-  9. it performs the configured lifecycle operations
-     * when `spec.prune: true`, it deletes previously managed objects that are no
-       longer present
-     * when configured, it waits for the applied objects to become ready
-  10. it updates `Kustomization/application.status`
-      * this is the same `Kustomization/application` object read in step 1
-      * the status records:
-        * last attempted source revision
-        * last successfully applied source revision
-        * managed-object inventory
-        * readiness conditions
-      * example
-
-        ```yaml
-        kind: Kustomization
-        metadata:
-          name: application
-        status:
-          lastAttemptedRevision: main@sha1:abc123
-          lastAppliedRevision: main@sha1:abc123
-          conditions:
-            - type: Ready
-              status: "True"
-              reason: ReconciliationSucceeded
-              message: "Applied revision: main@sha1:abc123"
-        ```
-
-  11. it removes the temporary working files
-  12. later reconciliation requests
-    * the configured interval queues periodic reconciliation
-    * a source-object watch event can queue Flux `Kustomization` objects referring
-      to a new artifact revision
-    * manual requests and retries can also queue reconciliation
+* `metadata.name: web-prod` is only a descriptive name for this reconciliation
+  unit
+  * Flux does not assign meaning to the `web-prod` naming pattern
+* Flux `Kustomization` versus Kustomize `kustomization.yaml`
+  * Flux `Kustomization`
+    * Kubernetes API object watched by `kustomize-controller`
+    * selects a source, path, interval and lifecycle options
+  * Kustomize `kustomization.yaml`
+    * file inside the selected directory
+    * lists resources, generators, patches and transformations
+    * is not stored as a Kubernetes API object
+* reconciliation flow for the example
+  1. `kustomize-controller` reads the live `Kustomization/web-prod` object
+  2. `spec.sourceRef` identifies `GitRepository/platform-config` in the same
+     namespace
+  3. the controller reads the artifact revision, digest and URL from that source
+     object's `status.artifact`
+  4. it downloads the compressed artifact, verifies its digest and extracts it
+     into a temporary directory
+  5. `spec.path` selects `apps/web/overlays/prod` inside the extracted files
+  6. the controller runs the Kustomize build
+     * the build resolves the overlay's resources, generators and patches
+     * the output is a stream of final Kubernetes manifests
+     * this does not compile application code or build a container image
+  7. it performs a server-side apply dry-run against the Kubernetes API
+     * Kubernetes compares fields managed by Flux with the live objects
+     * equal fields require no update
+     * different or missing fields produce changes that Flux then applies
+  8. if `spec.prune: true`, Flux uses the previous status inventory to delete
+     managed objects that are absent from the new build output
+  9. if `spec.wait: true`, Flux waits for supported applied objects to become
+     ready
+  10. it records the attempted revision, applied revision, managed-object
+      inventory and readiness conditions in `Kustomization/web-prod.status`
+  11. it deletes temporary data such as the downloaded archive and extracted
+      repository files
+* missing `kustomization.yaml`
+  * Flux automatically generates one from YAML manifests under `spec.path`
+  * commit an explicit `kustomization.yaml` as normal practice
+    * the selected resources and build behavior are then reviewable and can be
+      tested before merge
+  * Flux has no setting that fails reconciliation only because this file is
+    absent
 
 ### `helm-controller`
 
-* purpose
-  * performs Helm operations inside the cluster without a CI job or a human
-    running the Helm CLI
-  * keeps the chosen chart, values and failure behavior reconciled
-  * watches `HelmRelease` objects
-* Flux can deploy applications without Helm
-  * plain Kubernetes manifests and Kustomize overlays are built and applied by
-    `kustomize-controller`
-  * `helm-controller` processes only `HelmRelease` objects
-  * installing `helm-controller` does not cause ordinary manifests to be rendered
-    or managed by Helm
-* helm refresher
-    * Helm chart = reusable package containing templates, default values and metadata
-      * templates may render a Deployment, Service, RBAC objects and other
-        Kubernetes manifests
-      * not itself an installed application
-    * Helm release = one installed instance of one chart
-      * example: the same Redis chart could be installed as separate `dev-redis` and `prod-redis` releases with different values
-* components
-  * `HelmRepository`
-    * identifies an HTTP/S Helm repository
-    * watched by `source-controller`
-    * its artifact is the repository's `index.yaml`
-        * example: index.yaml
-            ```yaml
-            apiVersion: v1
-            entries:
-              webapp:
-                - name: webapp
-                  version: 2.4.1
-                  appVersion: "1.8.0"
-                  description: Company web application
-                  urls:
-                    - https://example.com/charts/webapp-2.4.1.tgz
-                  digest: sha256:abc123...
-                - name: webapp
-                  version: 2.3.0
-                  appVersion: "1.7.0"
-                  description: Company web application
-                  urls:
-                    - https://example.com/charts/webapp-2.3.0.tgz
-                  digest: sha256:def456...
-            ```
-  * `HelmRelease`
-    * example
-      ```yaml
-      kind: HelmRelease
+* terminology
+  * Helm chart: versioned package containing templates, default values and
+    metadata
+  * Helm release: installed instance of a chart; Helm stores its history in the
+    cluster, normally in Secrets
+  * Flux `HelmRelease`: custom Kubernetes API object that declares the desired
+    chart, values and Helm action policies
+* responsibility
+  * `helm-controller` watches live `HelmRelease` objects
+  * a creation, specification change, chart artifact change, referenced-values
+    change, interval or retry can trigger reconciliation
+  * the controller reads the desired release from the `HelmRelease` and performs
+    Helm install, upgrade, test, rollback or uninstall actions
+* example
+  ```yaml
+  apiVersion: helm.toolkit.fluxcd.io/v2
+  kind: HelmRelease
+  metadata:
+    name: web-prod
+    namespace: flux-system
+  spec:
+    interval: 10m
+    chart:
       spec:
-        chart:
-          spec:
-            chart: webapp                    # selects the chart name
-            version: "2.4.1"                 # selects the chart version
-            sourceRef:                       # identifies where the chart is published
-              kind: HelmRepository
-              name: company-charts
-        values:                              # overrides the chart's (template) default values
-          replicaCount: 3
-      ```
-    * manifest is normally committed to Git
-    * `kustomize-controller` applies the manifest and creates the live`HelmRelease` object
-  * `HelmChart`
-    * normally created automatically by `helm-controller` from the `HelmRelease`
-      * an `OCIRepository` referenced through `chartRef` is used directly
-    * requests the selected chart package
-    * watched by `source-controller`
-        * its artifact is the downloaded chart `.tgz`
-* flow
-  1. a `HelmRepository` identifies an HTTP/S Helm repository
-  2. `source-controller` reconciles the `HelmRepository`
-     * downloads its `index.yaml`
-     * publishes `index.yaml` as the `HelmRepository` artifact
-  3. Git contains a `HelmRelease` manifest that selects:
-     * chart name
-     * chart version
-     * release values
-  4. `kustomize-controller` reads the `HelmRelease` manifest from the
-     `GitRepository` artifact
-  5. `kustomize-controller` applies the `HelmRelease` to the Kubernetes API
-  6. the Kubernetes API stores the live `HelmRelease` object
-  7. `helm-controller` detects the `HelmRelease`
-     * reads its chart selection
-     * creates a `HelmChart` object
-     * keeps the release values in the `HelmRelease`
-  8. `source-controller` reconciles the `HelmChart`
-     * reads the `HelmRepository` artifact
-     * finds the selected chart's download URL in `index.yaml`
-     * downloads the chart package
-     * publishes the package as the `HelmChart` artifact
-  9. `helm-controller` continues reconciling the `HelmRelease`
-     * downloads the `HelmChart` artifact
-     * reads the values from the `HelmRelease`
-     * renders the chart with those values
-     * installs or upgrades the resulting Kubernetes objects
-     * updates `HelmRelease.status`
+        chart: webapp
+        version: "2.4.1"
+        sourceRef:
+          kind: HelmRepository
+          name: company-charts
+    values:
+      replicaCount: 3
+    driftDetection:
+      mode: enabled
+  ```
+  * `spec.values` overrides values defined by the chart
+  * `spec.valuesFrom` can load additional values from Secrets or ConfigMaps
+* HTTP/S Helm repository flow
+  1. the publisher uploads `webapp-2.4.1.tgz` to a web server or chart service
+     and adds its chart name, version, digest and URL to that service's
+     `index.yaml`
+     * this publication occurs outside Flux
+  2. Git contains manifests for `HelmRepository/company-charts` and
+     `HelmRelease/web-prod`
+  3. a Flux `Kustomization` applies both manifests, creating those two live API
+     objects
+  4. `source-controller` reconciles the `HelmRepository` after an object change
+     or its configured interval
+     * it downloads `index.yaml`
+     * it stores the index as an artifact
+     * it writes the artifact URL to `HelmRepository.status.artifact`
+  5. `helm-controller` notices the `HelmRelease`
+     * it creates a `HelmChart` object that requests chart `webapp`, version
+       `2.4.1`, from `HelmRepository/company-charts`
+  6. `source-controller` notices the `HelmChart`
+     * it reads the repository index artifact
+     * it finds and downloads `webapp-2.4.1.tgz`
+     * it stores that package as an artifact
+     * it writes the package URL and digest to `HelmChart.status.artifact`
+  7. `helm-controller` reads that status, downloads the chart package from the
+     internal `source-controller` URL and renders the templates with the values
+     from `HelmRelease/web-prod`
+  8. it compares the desired chart digest, values and action-relevant
+     `HelmRelease.spec` with the last successful Helm release recorded in the
+     cluster
+     * no recorded release: run Helm install
+     * different desired input: run Helm upgrade
+     * equal desired input: do not run install or upgrade
+  9. with `driftDetection.mode: enabled`, it also checks live Kubernetes objects
+     against the manifests recorded by Helm for the current release
+     * a server-side dry-run reports which object fields Kubernetes would change
+     * no reported change means no drift
+     * reported changes are applied to restore the Helm-recorded manifests
+  10. it updates the same `HelmRelease/web-prod.status`
+* after `HelmChart.status.artifact` is created, the `HelmChart` remains the
+  source object for that package
+  * it is reconciled when its requested chart or source revision changes
+  * `HelmRelease.status.helmChart` identifies it
+* OCI alternative
+  * `HelmRelease.spec.chartRef` can refer directly to an `OCIRepository`
+  * the OCI artifact then replaces the intermediate `HelmChart` in this flow
 
 ### `notification-controller`
 
-* purpose
-  * handles two independent directions
-    * inbound webhook: an external system asks Flux to reconcile sooner
-    * outbound alert: Flux reports a selected event to an external system
-  * does not fetch Git, render manifests or apply workloads
-  * watches `Receiver`, `Provider` and `Alert` objects
+* handles two independent directions
+  * inbound: accept an authenticated webhook and request early reconciliation
+  * outbound: forward selected Flux reconciliation results to an external system
+* `Receiver`, `Provider` and `Alert` are Flux custom resources, not built-in
+  Kubernetes kinds
+* `notification-controller` watches these objects for creation and specification
+  changes
+* it does not fetch Git, render manifests or apply workloads
 
 #### `Receiver`: inbound webhook
 
-* problem it solves
-  * without a webhook, a push is noticed on the next
-    `GitRepository.spec.interval`
-  * with a three-minute interval, the delay can be almost three minutes
-  * a webhook requests reconciliation immediately after the push
-* regular polling is still required
-  * it is the fallback when GitHub cannot reach the cluster or a webhook is lost
-  * a `Receiver` supplements polling; it does not replace it
+* purpose
+  * reduce the delay between an external change and the next source check
+  * example: a GitHub push requests immediate reconciliation of a
+    `GitRepository` instead of waiting for its interval
+* polling remains the fallback when delivery fails
 * example
-    ```yaml
-    apiVersion: notification.toolkit.fluxcd.io/v1
-    kind: Receiver
-    metadata:
-      name: platform-github
-      namespace: flux-system
-    spec:
-      type: github # selects GitHub payload parsing and HMAC signature verification
-      events:
-        - push # ignores other GitHub webhook event types
-      secretRef: # Kubernetes Secret in the `Receiver` namespace containing the webhook token
-        name: github-webhook-token # same token is configured as the GitHub webhook secret
-      resources: # objects to reconcile after an accepted request
-        - apiVersion: source.toolkit.fluxcd.io/v1
-          kind: GitRepository
-          name: platform-config
-    ```
-    * after applying it, notification-controller adds:
-      ```
-      status:
-        webhookPath: /hook/abc123...
-      ```
-* GitHub webhook authentication with HMAC (Hash-based Message Authentication Code)
-  * shared secret
-    * one random token is configured in GitHub webhook settings
-    * the same token is stored in the Kubernetes Secret referenced by
-      `Receiver.spec.secretRef`
-    * the token is not included in the webhook request
-        1. GitHub calculates an HMAC over the exact request body using the shared secret
-            * sends header: `X-Hub-Signature-256`: HMAC-SHA256
-        1. `notification-controller` calculates the expected HMAC from the received request body using the same shared secret
-            * rejects the request when the signatures differ
-            * when they match
-                1. reads the GitHub event type from the `X-GitHub-Event` header
-                   * example: `push`
-                2. checks whether it is listed in `Receiver.spec.events`
-                3. for an allowed event, requests reconciliation of the objects listed in
-                   `Receiver.spec.resources`
-  * why a shared secret is used
-    * HMAC is fast and simple for a direct relationship between GitHub and one
-      webhook receiver
-    * each webhook can use a different secret
-    * asymmetric signatures would additionally require public-key distribution,
-      selection and rotation
-    * trade-off: both GitHub and the receiver possess a secret capable of
-      producing a valid signature
+  ```yaml
+  apiVersion: notification.toolkit.fluxcd.io/v1
+  kind: Receiver
+  metadata:
+    name: platform-github
+    namespace: flux-system
+  spec:
+    type: github
+    events:
+      - push
+    secretRef:
+      name: github-webhook-token
+    resources:
+      - apiVersion: source.toolkit.fluxcd.io/v1
+        kind: GitRepository
+        name: platform-config
+  ```
+* after reconciliation, `Receiver.status.webhookPath` contains the generated URL
+  path
+  * expose `notification-controller` through the cluster's ingress or load
+    balancer
+  * configure GitHub to send webhook requests to that external host and path
+* `secretRef` identifies a Kubernetes Secret in the Receiver namespace
+  * the Secret must contain a `token` entry
+  * the same random token is configured as the GitHub webhook secret
+  * if the Secret manifest uses `stringData`, the token is plain text in that
+    manifest
+  * base64 encoding in `data` is not encryption
+  * do not commit the token unencrypted; use SOPS or an external secret system
+  * Kubernetes storage encryption depends on cluster configuration
+* HMAC verification
+  * HMAC is a keyed message-authentication code
+  * it proves that the sender knew the shared token and that the request body was
+    not changed
+  * it does not encrypt the request body
+  1. GitHub calculates an HMAC-SHA256 value from the request body and shared token
+  2. GitHub sends the value in `X-Hub-Signature-256`
+  3. `notification-controller` calculates the expected value with the Secret token
+  4. matching values permit event filtering and reconciliation; different values
+     reject the request
 
 #### `Provider` and `Alert`: outbound notification
-* example
+
+* purpose
+  * notify operators about selected results such as failed production
+    reconciliation or a newly applied revision
+* `Provider` defines one destination and its authentication
+* `Alert` selects Flux objects and minimum event severity, then refers to a
+  `Provider`
+* Flux controllers attach `info` or `error` severity to notification events
+  * this is Flux event metadata
+  * it is distinct from the Kubernetes Event `Normal` or `Warning` type
+* example: send error events from one production reconciliation to Slack
 
   ```yaml
-  apiVersion: notification.toolkit.fluxcd.io/v1beta3 # Flux notification API
-  kind: Provider                                    # outbound destination configuration
+  apiVersion: notification.toolkit.fluxcd.io/v1beta3
+  kind: Provider
   metadata:
-    name: operations-slack                          # name referenced by Alert.spec.providerRef
-    namespace: flux-system                          # namespace containing Provider and its Secret
+    name: operations-slack
+    namespace: flux-system
   spec:
-    type: slack                                     # use the Slack notification integration
-    address: https://slack.com/api/chat.postMessage # Slack API endpoint
-    channel: operations                             # Slack channel receiving the messages
-    secretRef:                                      # Secret containing Slack authentication data
+    type: slack
+    address: https://slack.com/api/chat.postMessage
+    channel: operations
+    secretRef:
       name: slack-bot-token
   ---
-  apiVersion: notification.toolkit.fluxcd.io/v1beta3 # Flux notification API
-  kind: Alert                                       # rule selecting events to send
+  apiVersion: notification.toolkit.fluxcd.io/v1beta3
+  kind: Alert
   metadata:
-    name: production-errors                         # name of this event-selection rule
-    namespace: flux-system                          # namespace containing the referenced objects
+    name: production-errors
+    namespace: flux-system
   spec:
-    providerRef:                                    # Provider used to deliver matching events
+    providerRef:
       name: operations-slack
-    eventSeverity: error                            # send only events with error severity
-    eventSources:                                   # Flux objects whose events are considered
-      - kind: Kustomization                         # watch events from a Flux Kustomization
-        name: nginx-prod                            # select Kustomization/nginx-prod
+    eventSeverity: error
+    eventSources:
+      - kind: Kustomization
+        name: web-prod
   ```
-* [`Provider`](https://fluxcd.io/flux/components/notification/providers/)
-  * tells `notification-controller` where and how to send an outbound notification
-  * defines:
-    * destination type
-      * example: Slack
-    * destination address
-      * example: Slack API endpoint
-    * destination within that system
-      * example: Slack channel
-    * authentication Secret
-      * example: Slack bot token
-  * does not select which Flux events should be sent
-    * event selection is configured by an `Alert`
-  * example: a Slack Provider is a Flux `Provider` object with
-    `spec.type: slack`
-  * it does not install Slack or create a workspace, app or channel
-* [`Alert`](https://fluxcd.io/flux/components/notification/alerts/)
-  * rule connecting selected Flux events to one Provider
+* `slack-bot-token` normally contains a Slack bearer token used to authenticate
+  the Slack API request
+  * this Slack integration does not use the GitHub webhook HMAC token
+  * HMAC is used only by provider types that explicitly support signed webhooks,
+    such as `generic-hmac`
 
 ### Image controllers
-* example
-    ```yaml
-    kind: ImageRepository
-    metadata:
-      name: payment-api                         # referenced by ImagePolicy
-    spec:
-      image: ghcr.io/company/payment-api        # registry repository to scan
-      interval: 1m                              # scan frequency
-    ---
-    kind: ImagePolicy
-    metadata:
-      name: payment-api-dev                     # referenced by $imagepolicy marker
-    spec:
-      imageRepositoryRef:
-        name: payment-api                       # ImageRepository containing scanned tags
-      policy:
-        semver:
-          range: ">=2.0.0 <3.0.0"               # allowed tag versions
-    ---
-    kind: ImageUpdateAutomation
-    metadata:
-      name: payment-api-dev                     # Git update configuration
-    spec:
-      interval: 1m                              # update frequency
-      sourceRef:
-        kind: GitRepository
-        name: gitops-flux-workshop               # Git repository to modify
-      update:
-        path: ./apps/payment-api/overlays/dev    # directory containing marked fields
-      git:
-        commit:
-          author:
-            name: flux
-            email: flux@example.com
-        push:
-          branch: main                           # destination branch
-    ```
-* optional Flux components
-  * useful when CI builds and pushes container images but does not update the
-    deployment repository
-  * automatically select an allowed image version and commit it to Git
-  * unnecessary when CI already updates Git
-* example: development environment
-    1. Git contains a development Deployment using version `2.4.0`.
-    
-       ```yaml
-       image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-dev"}
-    * marker format: {"$imagepolicy": "<policy-namespace>:<policy-name>"}
-        * is a machine-readable marker for image-automation-controller
 
-  2. CI builds and pushes new tags to the registry.
-
-     ```text
-     2.4.1
-     2.5.0-rc.1
-     3.0.0
-     ```
-
-  3. `image-reflector-controller`
-     * queries the registry and caches its tags locally
-     * applies an `ImagePolicy`, for example:
-
-       ```yaml
-       policy:
-         semver:
-           range: ">=2.0.0 <3.0.0"
-       ```
-
-     * selects the highest permitted stable tag: `2.4.1`
-     * updates the existing ImagePolicy Kubernetes object
-        ```
-        status:
-          latestRef:
-            image: ghcr.io/company/payment-api
-            tag: 2.4.1
-        ```
-     * does not update Git or Kubernetes
-  4. `image-automation-controller`
-     * watches `ImagePolicy` changes and reconciles at the configured interval
-     * constructs a marker key from `ImagePolicy.metadata`:
-       `flux-system` + `:` + `payment-api-dev`
-       → `flux-system:payment-api-dev`
-     * scans `ImageUpdateAutomation.spec.update.path` for the matching marker:
-  
-       ```yaml
-       image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-dev"}
-       ```
-  
-     * replaces the marked value with `ImagePolicy.status.latestRef`
-  5. normal Flux reconciliation deploys the committed image version to the
-     development environment
-* CI feedback loop
-  * problem
-    1. an application commit makes CI build and push `payment-api:2.4.2`
-    2. image-automation-controller commits `2.4.2` to the staging overlay
-    3. if CI builds an image after every commit, that automated commit builds
-       another image and the cycle repeats
-  * preferred mitigation: run the image-build workflow only when application or
-    build files change
-    * example
-        ```yaml
-        on:
-          push:
-            paths:
-              - "src/**"
-              - "build.gradle"
-        ```
-        * => a commit changing only `gitops/**` does not match these paths
-            * but Flux still notices and applies the Git change
-  * alternative: make image-automation-controller add a CI skip instruction to
-    its commit message
-
-    ```yaml
+* optional components
+  * `image-reflector-controller` discovers image tags and evaluates selection
+    policy
+  * `image-automation-controller` writes the selected image reference to Git
+* use these components when CI publishes container images but another automated
+  process must update the deployment repository
+  * do not use them when CI or a release process already makes the required Git
+    change
+* example objects
+  ```yaml
+  apiVersion: image.toolkit.fluxcd.io/v1
+  kind: ImageRepository
+  metadata:
+    name: payment-api
+    namespace: flux-system
+  spec:
+    image: ghcr.io/company/payment-api
+    interval: 5m
+  ---
+  apiVersion: image.toolkit.fluxcd.io/v1
+  kind: ImagePolicy
+  metadata:
+    name: payment-api-prod
+    namespace: flux-system
+  spec:
+    imageRepositoryRef:
+      name: payment-api
+    policy:
+      semver:
+        range: ">=2.0.0 <3.0.0"
+  ---
+  apiVersion: image.toolkit.fluxcd.io/v1
+  kind: ImageUpdateAutomation
+  metadata:
+    name: payment-api-prod
+    namespace: flux-system
+  spec:
+    interval: 5m
+    sourceRef:
+      kind: GitRepository
+      name: platform-config
+    update:
+      path: ./apps/payment-api/overlays/prod
     git:
       commit:
-        messageTemplate: |
-          Update staging image
-
-          [skip ci]
+        author:
+          name: flux
+          email: flux@example.com
+      push:
+        branch: main
+  ```
+* marked Deployment in the selected production overlay
+  ```yaml
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: payment-api
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: payment-api
+    template:
+      metadata:
+        labels:
+          app: payment-api
+      spec:
+        containers:
+          - name: payment-api
+            image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-prod"}
+  ```
+* complete flow
+  1. application CI builds an image and pushes tags to the GHCR repository
+     `ghcr.io/company/payment-api`
+  2. at each `ImageRepository.spec.interval`, `image-reflector-controller`
+     queries that registry repository and stores the discovered metadata in its
+     local cache and Kubernetes status fields
+  3. it evaluates `ImagePolicy/payment-api-prod`
+     * for tags `2.4.0`, `2.4.1`, `2.5.0-rc.1` and `3.0.0`, the example semantic
+       version policy selects stable tag `2.4.1`
+     * it writes the selected reference to `ImagePolicy.status.latestRef`
+     * it does not change Git or the running Deployment
+  4. `image-automation-controller` reconciles
+     `ImageUpdateAutomation/payment-api-prod`
+     * it checks out the branch configured by `GitRepository/platform-config`
+     * it scans `apps/payment-api/overlays/prod`
+     * the marker names `ImagePolicy/payment-api-prod` in namespace `flux-system`
+     * it replaces only the marked image field with
+       `ghcr.io/company/payment-api:2.4.1`
+     * it commits and pushes that file change to `main`
+  5. `source-controller` detects the new Git commit
+  6. the Flux `Kustomization` for the production overlay applies the committed
+     Deployment image change
+* same-repository CI loop
+  * this risk exists when application source and deployment YAML share one Git
+    repository
+  1. an application-source commit triggers the image-build workflow
+  2. Flux commits the new image tag to a deployment file in the same repository
+  3. an unrestricted workflow treats the Flux commit as another application
+     change and builds another image
+* GitHub Actions mitigation
+  * restrict the image-build workflow to application and build inputs
+  * example from `.github/workflows/build-image.yaml`
+    ```yaml
+    name: build-image
+    on:
+      push:
+        paths:
+          - "src/**"
+          - "build.gradle"
+          - "Dockerfile"
     ```
-    * when the automated commit contains `[skip ci]`, GitHub Actions skips workflows
-      that would be triggered by that commit through `push` or `pull_request`
+  * a Flux commit that changes only `apps/**` does not run this workflow
+  * Flux still observes that commit and applies the changed deployment manifest
 
 ## SOPS decryption
 
+* purpose
+  * explains the Flux-specific step between receiving an encrypted manifest and
+    applying the decrypted Kubernetes object
+  * the Spring Boot GitOps workshop uses this behavior and lists this workshop as
+    a prerequisite
 * input
   * Flux receives the encrypted files through the source artifact
 * reconciliation-time process
@@ -1078,235 +909,244 @@ I will inspect the repository’s Flux manifests so the example matches the work
 
 ## Flux versus Argo CD
 
-* shared model
-  * both pull desired state and compare it with live Kubernetes resources
-  * the important difference is how they organize ownership and operations
-  * for the shared GitOps concepts, see
-    [Argo CD](https://github.com/mtumilowicz/argoCD-workshop#argocd)
-* reconciliation unit
-  * Flux composes independent pipelines
-    * sources, infrastructure and workloads can have separate reconciliation,
-      dependencies and failure states
-    * fits platform repositories where cluster services must become ready before
-      applications
-    * there is no built-in object that presents the whole pipeline as one application
-  * Argo CD organizes delivery around an `Application`
-    * one object owns the desired resources, health, drift and synchronization history
-    * fits teams that deploy, inspect and operate software as application units
-    * infrastructure can be managed, but it must also be represented as applications
-* change control
-  * Flux normally applies a new source revision as soon as its reconciliation
-    pipeline observes it
-    * approval normally happens before merge, through the Git workflow
-    * suspending reconciliation stops the pipeline rather than creating a pending
-      synchronization for an operator to approve
-  * Argo CD separates comparison from synchronization
-    * an application can report `OutOfSync` while waiting for a manual sync
-    * automated sync, pruning and live-state self-healing are explicit policy choices
-    * fits environments where an operator must inspect a diff after merge and decide
-      when to deploy it
-* control-plane topology
-  * Flux is commonly installed in every target cluster
-    * each cluster reconciles independently and does not depend on a central CD service
-    * a controller failure affects its cluster, but fleet-wide inventory requires an
-      additional system
-  * Argo CD commonly registers many target clusters in one control plane
-    * operators get one inventory and operational interface for the fleet
-    * control-plane unavailability stops fleet reconciliation; compromise can expose
-      every cluster reachable with its registered credentials
-* tenancy
-  * Flux delegates deployment authority through Kubernetes namespaces, RBAC and
-    service accounts
-    * fits a platform whose team and security boundaries already exist in Kubernetes
-    * each reconciliation can be limited to the permissions of its service account
-  * Argo CD delegates application authority through its own RBAC and `AppProject`
-    policies
-    * projects restrict allowed sources, destination clusters, namespaces and resource
-      kinds
-    * fits a central platform where users operate applications without direct access
-      to target clusters
-* fleet rollout
-  * Flux commonly stores desired state per cluster and promotes changes by changing
-    the relevant cluster paths or revisions
-    * fits clusters that may intentionally differ or be operated independently
-  * Argo CD can generate applications from cluster and repository data with
-    `ApplicationSet`
-    * fits centrally applying a standard application catalogue across many registered
-      clusters
-* operator workflow
-  * Flux exposes reconciliation through Kubernetes resources, events and logs
-    * fits operators who already diagnose systems through Kubernetes APIs and
-      observability tools
-  * Argo CD adds an application-focused API and web interface
-    * fits operators who need one place for application health, resource topology,
-      diffs, history and synchronization actions
-* choose Flux when the critical requirement is
-  * independent reconciliation inside each cluster
-  * one delivery model for both platform infrastructure and workloads
-  * authorization that follows existing Kubernetes tenancy boundaries
-* choose Argo CD when the critical requirement is
-  * centralized inventory and operation of many applications or clusters
-  * manual synchronization or visual diff review after a Git change
-  * application operations for users who should not access target clusters directly
+Both systems pull desired state and compare it with Kubernetes. The main
+difference is the operational unit presented to users.
+
+| Concern | Flux | Argo CD |
+|---|---|---|
+| Primary unit | A Flux `Kustomization` reconciles one source path. A repository can use several independent Kustomizations. | An `Application` identifies a source, path and destination. Argo CD reports and operates that resource tree as one application. |
+| Apply timing | A new observed source revision is reconciled automatically unless the Kustomization is suspended. | Without automated sync, Argo CD detects a difference but waits for a user or API request to synchronize it. |
+| Drift correction | Periodic Kustomization reconciliation restores managed fields. | Automatic self-healing must be enabled when live drift should trigger synchronization. |
+| Pruning | `Kustomization.spec.prune: true`. | `Application.spec.syncPolicy.automated.prune: true` for automatic pruning; manual synchronization can also prune. |
+| Normal topology | Install Flux controllers in each target cluster. | Install Argo CD in a management cluster and register target clusters, or manage the installation cluster itself. |
+| User interface | Kubernetes API, Flux CLI, events and logs. | Application API, CLI and web interface with diffs, resource tree, health and sync history. |
+| Authorization | Kubernetes RBAC and the ServiceAccount used by a reconciliation. | Argo CD RBAC and `AppProject` restrictions for sources, destinations and resource kinds. |
+
+### Resource organization
+
+* Flux example
+  ```yaml
+  apiVersion: kustomize.toolkit.fluxcd.io/v1
+  kind: Kustomization
+  metadata:
+    name: applications
+    namespace: flux-system
+  spec:
+    interval: 5m
+    path: ./applications
+    prune: true
+    sourceRef:
+      kind: GitRepository
+      name: platform-config
+    dependsOn:
+      - name: infrastructure
+  ```
+  * `Kustomization/infrastructure` and `Kustomization/applications` have separate
+    status, retry and source-path configuration
+  * `dependsOn` prevents application reconciliation until infrastructure reports
+    ready
+  * this dependency graph is a direct Flux feature
+* Argo CD example
+  * infrastructure and workloads can each be managed by an `Application`
+  * every resource managed by Argo CD must belong to an Application resource tree
+  * ordering inside an Application can use sync phases and waves
+  * coordination across separate Applications requires an additional composition
+    pattern, such as app-of-apps
+
+### Deployment approval
+
+* Flux normally treats an accepted Git commit as approved desired state
+  * source detection triggers reconciliation without a second deployment approval
+  * suspending a Kustomization stops all reconciliation; Flux does not create a
+    native pending deployment with an approve button
+* Argo CD can separate detection from deployment
+  * the Application controller calculates the difference after merge
+  * with automated sync disabled, the Application remains unsynchronized until a
+    user or API client starts synchronization
+  * this is useful when deployment authorization is separate from code approval,
+    or when production changes must wait for a maintenance window or coordinated
+    release
+  * the trade-off is that merged Git state does not mean deployed state
+* Argo CD can also behave automatically
+  ```yaml
+  spec:
+    syncPolicy:
+      automated:
+        enabled: true
+        prune: true
+        selfHeal: true
+  ```
+
+### Multiple clusters
+
+* fleet: the set of clusters and applications operated by one platform team
+* per-cluster Flux
+  * each cluster runs its own controllers and uses in-cluster Kubernetes identity
+  * loss of Flux in one cluster stops reconciliation there but does not stop other
+    clusters
+  * a consolidated fleet list or dashboard requires another aggregation system
+* centralized Argo CD
+  * the Argo CD control plane runs as Pods in a management cluster
+  * it stores each registered target API endpoint and access configuration in
+    Kubernetes Secrets
+  * its application controller connects from the management cluster to every
+    registered target cluster
+  * the UI can show application health, revision, synchronization state and
+    resources across those clusters
+  * if the Argo CD control plane is unavailable, existing workloads continue but
+    new comparisons and synchronizations stop
+  * compromise of the control plane can affect every target allowed by its stored
+    credentials
+
+### Practical selection
+
+* Flux is direct when platform infrastructure and workloads need independent
+  in-cluster reconciliation with Kubernetes-native dependencies and RBAC
+* Argo CD can manage the same infrastructure, but it must be represented through
+  Applications and Argo CD policies
+* Argo CD is direct when operators need a centralized application inventory,
+  visual diff and manual synchronization after merge
+* Flux can support those operating practices only with additional user-interface,
+  inventory or approval tooling
 
 ## Troubleshooting
 
-* start by checking Flux and finding failed objects
+### First checks
 
-  ```bash
-  flux check
-  flux get all -A --status-selector ready=false
-  flux logs -A --level=error --since=10m
-  ```
+```bash
+flux check
+flux get all -A
+flux get all -A --status-selector ready=false
+```
 
-  * `flux check`: reports whether the Flux controllers and required APIs are ready
-  * `flux get`: lists not-ready Flux objects and their `MESSAGE`
-  * `flux logs`: prints recent error logs from all Flux controllers
-    * `--since=10m` does not guarantee ten minutes of logs
-        * logs from that period may already have been rotated or lost
-* inspect one object
-  ```bash
-  kubectl -n <namespace> describe <kind> <name>
-  flux events --for <kind>/<name> -n <namespace>
-  flux logs --kind=<kind> --name=<name> \
-    --namespace=<namespace> --since=10m
-  ```
+* `flux check`
+  * verifies that required Flux APIs and controller Deployments are available
+* `flux get all -A`
+  * lists all supported Flux custom resources and their current readiness summary
+* `--status-selector ready=false`
+  * filters that list to objects whose `Ready` condition is `False`
+  * examples include a `GitRepository` that cannot fetch Git, a `Kustomization`
+    that cannot apply manifests and a `HelmRelease` whose install failed
 
-  * `kubectl describe`: shows its `spec`, conditions and recent Kubernetes events
-  * `flux events`: shows reconciliation events for that object
-* inspect the Kubernetes objects managed by one Flux `Kustomization`
+### Inspection commands
 
-  ```bash
-  flux tree kustomization <name> -n <namespace>
-  ```
+| Command | Use |
+|---|---|
+| `kubectl describe` | Show one object's specification, status conditions and recent Kubernetes Events in one report. |
+| `flux events` | Filter or watch Kubernetes Events associated with Flux objects. Use it when the event timeline is the focus. |
+| `flux logs` | Read detailed controller process logs. Use it when conditions and Events omit the internal error detail. |
+| `flux tree kustomization` | Show the resource hierarchy recorded for one Flux Kustomization. |
 
-  * `flux tree`: shows Kubernetes objects managed by that Flux `Kustomization`
+```bash
+kubectl -n <namespace> describe <kind> <name>
+flux events --for <kind>/<name> -n <namespace>
+flux logs --kind=<kind> --name=<name> \
+  --namespace=<namespace> --since=10m
+flux tree kustomization <name> -n <namespace>
+```
 
-* case study: failing `HelmRelease`
-  * example condition from `HelmRelease.status.conditions`
+* `flux tree kustomization` prints the object references recorded in the Flux
+  Kustomization's `.status.inventory`
+  * these are final objects that the Kustomize build produced and Flux applied
+    successfully
+* log retention depends on the cluster logging configuration
+  * `--since=10m` cannot return logs that were already rotated or lost
 
-    ```yaml
-    - type: Ready
-      status: "False"
-      reason: InstallFailed
-      message: Helm install failed because Deployment/payment-api was not ready
-    ```
+### Case study: failed `HelmRelease`
 
-  * `False` does not always mean failure
-  * `False` is meaningful only together with the condition type
-  * interpretation
-    * `type: Ready`: reports whether the desired release is ready
-    * `status: "False"`: the desired release is failing or blocked
-    * `reason`: identifies the failure category
-    * `message`: identifies the concrete cause
-  * common conditions
-    * `Ready=True`: release successfully reconciled
-    * `Ready=False`: release is failing or blocked
-      * `InstallFailed`, `UpgradeFailed` or `TestFailed`: Helm operation failed
-      * `RollbackFailed` or `UninstallFailed`: remediation failed
-      * message mentions an unready `HelmChart`: chart is unavailable
-      * message mentions a dependency: dependent `HelmRelease` is not ready
-      * message mentions `valuesFrom`: referenced `ConfigMap` or `Secret` is
-        missing or invalid
-      * other error in `message`: concrete rendering, validation, timeout or
-        Kubernetes resource failure
-    * `Reconciling=True`: another attempt is currently running
-    * `Drifted=False`: no drift was found; this is healthy
-  * inspect the release
+1. Find the failed release.
 
-    ```bash
-    flux get helmreleases -A --status-selector ready=false --show-source
-    flux events --for HelmRelease/<release-name> -n <release-namespace>
-    flux logs --kind=HelmRelease --name=<release-name> \
-      --namespace=<release-namespace> --since=10m
-    kubectl -n <release-namespace> describe helmrelease <release-name>
-    ```
+   ```bash
+   flux get helmreleases -A --status-selector ready=false --show-source
+   ```
 
-    * the first command summarizes readiness, chart revision and the latest message
-    * events and logs show the failed install, upgrade, test or remediation
-  * if the message says that a `HelmChart` is not ready, inspect the source chain
-    * Helm cannot install the release until both inputs are ready
+2. Read the complete condition and recent Events.
 
-      ```text
-      HelmRepository index.yaml
-        → HelmChart .tgz package
-        → HelmRelease installation
-      ```
+   ```bash
+   kubectl -n <release-namespace> describe helmrelease <release-name>
+   ```
 
-    1. check whether Flux downloaded the repository index
+   Example `Ready` condition:
 
-       ```bash
-       flux get sources helm -A --status-selector ready=false
-       ```
+   ```yaml
+   - type: Ready
+     status: "False"
+     reason: InstallFailed
+     message: Helm install failed because Deployment/payment-api was not ready
+   ```
 
-       * shortened failure result
+   Read a condition as one tuple:
 
-         ```text
-         NAME               READY   MESSAGE
-         <repository-name>  False   failed to fetch Helm repository: ...
-         ```
+   * `type: Ready` asks whether the desired Helm release is installed and current
+   * `status: "False"` answers no
+   * `reason: InstallFailed` classifies the failed operation
+   * `message` names the immediate cause
 
-       * `Ready=False`: Flux cannot read `index.yaml`; check the URL,
-         authentication and network
-    2. check whether Flux downloaded the selected chart package
+   A condition value has meaning only with its type. For example,
+   `Drifted=False` means that no drift was detected and is healthy.
 
-       ```bash
-       flux get sources chart -A --status-selector ready=false
-       ```
+3. Identify the failed stage from `reason` and `message`.
 
-       * shortened failure result
+   * `InstallFailed`, `UpgradeFailed` or `TestFailed`: that Helm action failed
+   * `RollbackFailed` or `UninstallFailed`: automatic failure handling failed
+     * remediation is the configured retry, rollback or uninstall response to a
+       failed Helm action
+   * missing `valuesFrom` reference: inspect the named Secret or ConfigMap
+   * unready dependency: inspect the named dependent `HelmRelease`
+   * unready `HelmChart`: inspect the chart source path in step 4
+   * unready rendered workload: inspect the named Deployment, Job or Pod and the
+     configured Helm timeout
 
-         ```text
-         NAME          READY   MESSAGE
-         <chart-name>  False   no chart version found for <chart>-<version>
-         ```
+4. If the `HelmChart` is not ready, trace chart acquisition.
 
-       * inspect the failed `HelmChart`
+   ```text
+   HelmRepository artifact: index.yaml
+     → HelmChart artifact: selected .tgz package
+     → HelmRelease: rendered and installed release
+   ```
 
-         ```bash
-         kubectl -n <chart-namespace> describe \
-           helmchart.source.toolkit.fluxcd.io <chart-name>
-         ```
+   Check the repository first:
 
-         * `Spec.Chart`: requested chart name
-         * `Spec.Version`: requested version
-         * `Spec.Source Ref`: referenced `HelmRepository`
-         * `Conditions` and `Events`: concrete failure
-       * common messages
-         * `no chart version found`: chart name or version is absent from
-           `index.yaml`
-         * `failed to download chart`: package URL, authentication or network failed
-         * `HelmRepository ... is not ready`: fix the repository first
-  * recreate a failed initial installation when its earlier logs are unavailable
-    1. preserve the current conditions and events before deleting the object
+   ```bash
+   flux get sources helm -A
+   kubectl -n <repository-namespace> describe helmrepository <repository-name>
+   ```
 
-       ```bash
-       kubectl -n <release-namespace> describe helmrelease <release-name>
-       flux events --for HelmRelease/<release-name> -n <release-namespace>
-       ```
+   * `Ready=False` means that Flux could not produce the `index.yaml` artifact
+   * check the repository URL, authentication, TLS and network error in the
+     condition message
 
-    2. follow new reconciliation logs in terminal one
+   Then check the generated chart source:
 
-       ```bash
-       flux logs --kind=HelmRelease --name=<release-name> \
-         --namespace=<release-namespace> --follow
-       ```
+   ```bash
+   flux get sources chart -A
+   kubectl -n <chart-namespace> describe \
+     helmchart.source.toolkit.fluxcd.io <chart-name>
+   ```
 
-    3. delete the failed object in terminal two
+   * `HelmChart.spec` shows the requested chart, version and repository
+   * `HelmChart.status.artifact` exists only after `source-controller` finds and
+     downloads the selected package
+   * `no chart version found` means the requested name or version is absent from
+     `index.yaml`
+   * `failed to download chart` identifies a package URL, authentication, TLS or
+     network failure
 
-       ```bash
-       kubectl -n <release-namespace> delete helmrelease <release-name>
-       ```
+5. Read detailed logs only when the status and Events are insufficient.
 
-    4. reconcile the Flux `Kustomization` that manages it
+   ```bash
+   flux events --for HelmRelease/<release-name> -n <release-namespace>
+   flux logs --kind=HelmRelease --name=<release-name> \
+     --namespace=<release-namespace> --since=10m
+   ```
 
-       ```bash
-       flux reconcile kustomization <kustomization-name> \
-         --namespace=<kustomization-namespace> --with-source
-       ```
+6. Correct the cause in Git or in the referenced dependency.
 
-    5. `kustomize-controller` recreates the `HelmRelease` from Git and
-       `helm-controller` performs a fresh installation
-    * use this only for a failed initial installation
-      * deleting a failed upgrade can uninstall a previous working release
+   * normal reconciliation retries according to the `HelmRelease` policy
+   * request an immediate retry with `flux reconcile helmrelease <name>`
+   * when configured remediation retries are exhausted, use `--reset` only after
+     correcting the cause
+   * do not delete the `HelmRelease` as a routine troubleshooting step; deletion
+     can uninstall the managed release
+
 * [Flux troubleshooting cheatsheet](https://fluxcd.io/flux/cheatsheets/troubleshooting/)
