@@ -69,27 +69,17 @@
   * keeps reviewed desired state in Git
   * runs controllers inside the target environment
   * pulls desired state and continuously reconciles it with the live system
-* vs push-pipeline
-  * execution
-    * a one-shot push pipeline runs a deployment command and then stops
-    * Flux runs continuously inside the cluster
-  * direction
-    * a push pipeline sends changes from CI to Kubernetes
-    * Flux pulls desired state from Git
-  * credentials
-    * a push pipeline requires CI to hold Kubernetes credentials
-    * Flux uses its in-cluster Kubernetes identity
-  * drift
-    * a one-shot pipeline does not detect changes made after deployment
-    * Flux regularly compares live resources with Git and corrects drift
-  * retries
-    * a failed push requires a pipeline retry or another run
-    * Flux keeps retrying failed reconciliation
-  * audit records
-    * a push pipeline can retain Git commits, pull-request approvals, CI logs,
-      deployment records and Kubernetes audit logs
-    * Flux can retain the same Git history plus reconciliation status, events
-      and controller logs
+* vs push pipeline
+
+  | Aspect | Push pipeline | Flux |
+  |---|---|---|
+  | Execution | Runs a deployment command once, then stops. | Runs continuously inside the cluster. |
+  | Direction | Pushes changes from CI to Kubernetes. | Pulls desired state from Git. |
+  | Credentials | Requires CI to hold Kubernetes credentials. | Uses its in-cluster Kubernetes identity. |
+  | Drift | Does not detect changes made after deployment. | Regularly detects and corrects drift. |
+  | Retries | Requires a pipeline retry or another run. | Continues retrying failed reconciliation. |
+  | Audit records | Can retain Git history, approvals, CI logs, deployment records, and Kubernetes audit logs. | Adds reconciliation status, events, and controller logs to the same Git history. |
+
   * important distinction
     * auditability records what happened
     * reconciliation continuously restores the declared desired state
@@ -381,11 +371,10 @@ external-secrets controller
           * it obtains the selected chart artifact
           * it renders the chart with the configured values
           * it installs, upgrades and continuously reconciles the Helm release
-* no controller owns the complete process
-  * each controller performs, retries and reports its own part
 * architecture
   * Flux consists of several controllers running inside Kubernetes
   * each controller handles one part of the process
+    * in particular: no controller owns the complete process
   * controllers communicate through objects stored in the Kubernetes API
 * notifications
   * Flux controllers emit Kubernetes events
@@ -399,8 +388,6 @@ external-secrets controller
 * optional installation
   * `image-reflector-controller`
   * `image-automation-controller`
-* no controller owns the complete process
-  * each controller performs, retries and reports its own part
 
 ### `source-controller`
 
