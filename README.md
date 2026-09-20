@@ -38,7 +38,8 @@
     * page: `environment: prod`
 * application
   * each overlay provides its page through a `ConfigMap`
-  * there is no application project or image build
+    * example: `index.html: "environment: dev"`
+    * in particular: there is no application project or image build
 * prerequisite knowledge
   * Kubernetes API server, resources, desired state, built-in controllers,
     namespaces, Deployments, Services, ConfigMaps, Secrets and RBAC from:
@@ -51,9 +52,6 @@
 
 * [`sops-setup/workshop.agekey`](./sops-setup/workshop.agekey)
   * disposable private identity committed for reproducibility
-  * provides no confidentiality
-* production private identities
-  * must be delivered outside Git
 
 ## GitOps and Flux
 
