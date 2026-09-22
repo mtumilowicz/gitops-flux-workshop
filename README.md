@@ -11,7 +11,6 @@
 * [Image automation controllers](https://fluxcd.io/flux/components/image/)
 * [Notification controller](https://fluxcd.io/flux/components/notification/)
 * [Repository structures](https://fluxcd.io/flux/guides/repository-structure/)
-* [SOPS decryption](https://fluxcd.io/flux/guides/mozilla-sops/)
 * [Flux security](https://fluxcd.io/flux/security/)
 * [Kubernetes workshop](https://github.com/mtumilowicz/kubernetes-workshop#readme)
 * [Kubernetes objects](https://kubernetes.io/docs/concepts/overview/working-with-objects/)
@@ -26,32 +25,10 @@
 
 * purpose
   * demonstrates pull-based GitOps with Flux on Docker Desktop Kubernetes
-  * deploys the same nginx base to two namespaces
-* environments
-  * dev
-    * namespace: `nginx-dev`
-    * replicas: 1
-    * page: `environment: dev`
-  * prod
-    * namespace: `nginx-prod`
-    * replicas: 2
-    * page: `environment: prod`
-* application
-  * each overlay provides its page through a `ConfigMap`
-    * example: `index.html: "environment: dev"`
-    * in particular: there is no application project or image build
 * prerequisite knowledge
   * Kubernetes API server, resources, desired state, built-in controllers,
-    namespaces, Deployments, Services, ConfigMaps, Secrets and RBAC from:
+    namespaces, Deployments, Services and ConfigMaps from:
     https://github.com/mtumilowicz/kubernetes-workshop
-  * Kustomize bases, overlays and patches from: https://github.com/mtumilowicz/kustomize-workshop
-  * SOPS recipients, identities and encrypted YAML from: https://github.com/mtumilowicz/sops-age-key-workshop
-* scope: covers only the Flux-specific use of Kustomize and SOPS
-
-### Warning
-
-* [`sops-setup/workshop.agekey`](./sops-setup/workshop.agekey)
-  * disposable private identity committed for reproducibility
 
 ## GitOps and Flux
 
@@ -65,10 +42,7 @@
                                       ↓ apply
                                  Kubernetes API
         ```
-* Flux
-  * keeps reviewed desired state in Git
-  * runs controllers inside the target environment
-  * pulls desired state and continuously reconciles it with the live system
+* Flux - pulls desired state and continuously reconciles it with the live system
 * vs push pipeline
 
   | Aspect | Push pipeline | Flux |
@@ -80,9 +54,6 @@
   | Retries | Requires a pipeline retry or another run. | Continues retrying failed reconciliation. |
   | Audit records | Can retain Git history, approvals, CI logs, deployment records, and Kubernetes audit logs. | Adds reconciliation status, events, and controller logs to the same Git history. |
 
-  * important distinction
-    * auditability records what happened
-    * reconciliation continuously restores the declared desired state
 * Flux reconciliation
   * Kubernetes refresher
     * a controller watches API objects for changes and also reconciles them on a
@@ -96,6 +67,11 @@
   * pruning
     * when `spec.prune: true`, Flux deletes managed objects removed from the
       desired state
+  * dependency graphs
+    * within one Flux `Kustomization`, Flux applies CRDs and Namespaces before
+      resources that require them
+    * between Flux `Kustomization` objects, `spec.dependsOn` defines explicit
+      readiness dependencies
 * recovery through Git history
   * restore a previous desired state with a new commit that reverts the change
 
@@ -151,26 +127,21 @@
       `CustomResourceDefinition`
     * use `kubectl api-resources --namespaced=true` and
       `kubectl api-resources --namespaced=false` to inspect each category
-  * complete object identity
-    * API group, resource type, namespace when applicable, and name
+  * object identity = API group, resource type, namespace when applicable, and name
   * `spec`
     * desired configuration supplied by an API client
-    * the client can be a person, `kubectl`, Flux or another controller
+        * the client can be a person, `kubectl`, Flux or another controller
     * example: a `Deployment` specification requests two replicas
       ```yaml
       spec:
         replicas: 2
       ```
   * `status`
-    * controller report about the observed state and the result of processing
-      `spec`
     * the controller normally updates the object's `/status` API subresource
-    * the API server stores `status` as a field of the same object in the control
-      plane data store, normally etcd
-    * example: `kubectl get deployment web -n team-a -o yaml` returns both
-      `spec` and `status`
+        * controller report about the observed state and the result of processing `spec`
+    * example: `kubectl get deployment web -n team-a -o yaml` returns both `spec` and `status`
 * manifest vs object
-  * manifest: local or generated input sent to the Kubernetes API
+  * manifest: input sent to the Kubernetes API
   * object: validated API data stored by the Kubernetes control plane
   * flow
       1. `kubectl apply -f deployment.yaml` sends the manifest to the API server
@@ -255,9 +226,7 @@
 * using existing CRDs
   * many open-source projects provide ready-made CRDs and controllers
   * their Helm chart or installation manifests normally install both
-  * examples include Flux, cert-manager and Prometheus Operator
-  * inspect the project's CRDs, controller images, RBAC and upgrade procedure
-    before installation
+    * example: Flux
 * creating a custom API
   * first check whether a built-in type or an established project already meets
     the requirement
@@ -279,6 +248,25 @@
   * `source-controller` stores the files and serves them inside the cluster
   * Kubernetes objects store the artifact revision, digest and download URL
 
+### Bootstrap boundary
+
+* installing Flux creates its CRDs and starts its controllers
+* Flux controllers watch objects stored in the Kubernetes API
+  * they do not scan Git repositories for Flux custom-resource manifests
+* the first Source and reconciliation objects must be created through one of:
+  * `flux bootstrap`
+  * a Kubernetes client such as `kubectl`
+  * an existing parent Flux reconciliation
+* a manifest committed to Git has no effect until an existing reconciliation
+  selects the directory containing it
+* a Kustomize file used for bootstrap is processed by the invoking client
+  * example: `kubectl apply -k <directory>` builds that directory locally and
+    sends the resulting objects to the Kubernetes API
+  * Flux does not continuously reconcile that bootstrap directory unless a Flux
+    `Kustomization` selects it
+  * adding another manifest to the directory has no effect until a Kustomize
+    resource list selects it and the build output is applied
+
 ### Workshop flow: Git to Kubernetes
 
 1. `GitRepository/gitops-flux-workshop` in namespace `flux-system` specifies:
@@ -295,17 +283,19 @@
      service
    * it records the commit, digest and URL in
      `GitRepository.status.artifact`
-4. `Kustomization/nginx-dev` in namespace `flux-system` reads:
+4. `Kustomization/nginx` in namespace `flux-system` reads:
    * `spec.sourceRef.name: gitops-flux-workshop` to select the source object
-   * `spec.path: ./apps/nginx/overlays/dev` to select a directory inside the
+   * `spec.path: ./apps/nginx` to select a directory inside the
      artifact
 5. `kustomize-controller` downloads and verifies the artifact
 6. `kustomize-controller` builds the selected directory
-   * “build” means resolve the Kustomize resources, generators and patches into
-     final Kubernetes manifests
-   * in this workshop, the dev overlay combines the nginx base, dev
-     `ConfigMap`, encrypted `Secret` and Deployment patch
-7. `kustomize-controller` compares desired and live objects
+   * “build” means read `apps/nginx/kustomization.yaml` and produce the final
+     Kubernetes manifests
+   * the output contains the Namespace, ConfigMap, Deployment and Service
+7. `kustomize-controller` resolves the apply order
+   * it applies `Namespace/nginx` before the namespaced objects
+   * no separate namespace reconciliation is required
+8. `kustomize-controller` compares desired and live objects
    * it uses a server-side apply dry-run during periodic reconciliation
    * if a managed field differs, it applies the desired value through the
      Kubernetes API
@@ -313,12 +303,16 @@
      change
    * because `spec.prune: true`, it deletes previously managed objects that are
      absent from the build output
-8. built-in Kubernetes controllers process the applied objects
+9. built-in Kubernetes controllers process the applied objects
    * example: the Deployment controller creates a ReplicaSet, and the ReplicaSet
      controller creates the requested Pods
-9. Flux records the applied revision, inventory and conditions in
-   `Kustomization/nginx-dev.status`
-10. source changes, API watch events, intervals, retries and manual requests
+   * the Service can exist before the Pods; it gains endpoints when matching Pods
+     become ready
+10. because `spec.wait: true`, Flux waits for the supported applied objects to
+    become ready
+11. Flux records the applied revision, inventory and conditions in
+    `Kustomization/nginx.status`
+12. source changes, API watch events, intervals, retries and manual requests
     trigger later reconciliations
 
 ## Flux components
@@ -517,66 +511,99 @@
   * it does not create a Flux `Kustomization` for every applied object
   * the applied Deployments, Services and other objects keep their own Kubernetes
     `status`
-* representative production overlay
+* execution model
+  * `kustomize-controller` uses the Kustomize Go library; it does not start a
+    `kubectl apply -k` process
+  * it builds and validates the selected source path in memory
+  * it applies the resulting objects directly through the Kubernetes API by
+    using server-side apply
+  * `kubectl kustomize <path>` is a local way to inspect the build output; it is
+    not the command executed by Flux
+* workshop example
   ```yaml
   apiVersion: kustomize.toolkit.fluxcd.io/v1
   kind: Kustomization
   metadata:
-    name: web-prod
+    name: nginx
     namespace: flux-system
   spec:
-    interval: 5m
-    retryInterval: 30s
-    path: ./apps/web/overlays/prod
+    interval: 1m
+    retryInterval: 20s
+    timeout: 2m
+    path: ./apps/nginx
     prune: true
     wait: true
     sourceRef:
       kind: GitRepository
-      name: platform-config
+      name: gitops-flux-workshop
   ```
-* `metadata.name: web-prod` is only a descriptive name for this reconciliation
+* `metadata.name: nginx` is only a descriptive name for this reconciliation
   unit
-  * Flux does not assign meaning to the `web-prod` naming pattern
+  * Flux does not derive the source path or target namespace from this name
 * Flux `Kustomization` versus Kustomize `kustomization.yaml`
   * Flux `Kustomization`
     * Kubernetes API object watched by `kustomize-controller`
     * selects a source, path, interval and lifecycle options
+    * is processed continuously after it is stored in the Kubernetes API
   * Kustomize `kustomization.yaml`
     * file inside the selected directory
     * lists resources, generators, patches and transformations
     * is not stored as a Kubernetes API object
+    * is processed when a Flux `Kustomization` reconciles that directory
 * reconciliation flow for the example
-  1. `kustomize-controller` reads the live `Kustomization/web-prod` object
-  2. `spec.sourceRef` identifies `GitRepository/platform-config` in the same
+  1. `kustomize-controller` reads the live `Kustomization/nginx` object
+  2. `spec.sourceRef` identifies `GitRepository/gitops-flux-workshop` in the same
      namespace
   3. the controller reads the artifact revision, digest and URL from that source
      object's `status.artifact`
   4. it downloads the compressed artifact, verifies its digest and extracts it
      into a temporary directory
-  5. `spec.path` selects `apps/web/overlays/prod` inside the extracted files
+  5. `spec.path` selects `apps/nginx` inside the extracted files
   6. the controller runs the Kustomize build
-     * the build resolves the overlay's resources, generators and patches
+     * the build reads the committed `kustomization.yaml` resource list
      * the output is a stream of final Kubernetes manifests
      * this does not compile application code or build a container image
-  7. it performs a server-side apply dry-run against the Kubernetes API
+  7. it orders the Namespace before the namespaced resources
+     * this resolves the structural dependency inside this reconciliation
+     * `spec.dependsOn` is used instead when separate Flux `Kustomization`
+       objects require readiness ordering
+  8. it performs a server-side apply dry-run against the Kubernetes API
      * Kubernetes compares fields managed by Flux with the live objects
      * equal fields require no update
      * different or missing fields produce changes that Flux then applies
-  8. if `spec.prune: true`, Flux uses the previous status inventory to delete
+  9. if `spec.prune: true`, Flux uses the previous status inventory to delete
      managed objects that are absent from the new build output
-  9. if `spec.wait: true`, Flux waits for supported applied objects to become
+  10. if `spec.wait: true`, Flux waits for supported applied objects to become
      ready
-  10. it records the attempted revision, applied revision, managed-object
-      inventory and readiness conditions in `Kustomization/web-prod.status`
-  11. it deletes temporary data such as the downloaded archive and extracted
+  11. it records the attempted revision, applied revision, managed-object
+      inventory and readiness conditions in `Kustomization/nginx.status`
+  12. it deletes temporary data such as the downloaded archive and extracted
       repository files
 * missing `kustomization.yaml`
-  * Flux automatically generates one from YAML manifests under `spec.path`
-  * commit an explicit `kustomization.yaml` as normal practice
-    * the selected resources and build behavior are then reviewable and can be
-      tested before merge
-  * Flux has no setting that fails reconciliation only because this file is
-    absent
+  * behavior
+    * Flux generates one in memory from Kubernetes YAML manifests under
+      `spec.path`
+    * the generated file is not written to Git
+    * Flux has no setting that fails reconciliation only because this file is
+      absent
+  * limitations
+    * resource selection is implicit
+      * adding a YAML manifest under the selected tree can add it to the build
+    * non-Kubernetes YAML can fail the build unless source ignore rules exclude
+      it
+    * no Kustomize namespace transformation is declared
+      * manifests must declare their namespaces or the Flux `Kustomization` must
+        set `spec.targetNamespace`
+    * patches, generators and other Kustomize transformations cannot be
+      configured for that directory
+    * `kubectl kustomize <path>` cannot reproduce the build without a local
+      Kustomize file
+    * reviewers cannot inspect one explicit list of managed resources
+  * recommendation
+    * automatic generation is acceptable for a small directory containing only
+      Kubernetes manifests
+    * otherwise, commit an explicit `kustomization.yaml` so resource selection
+      and transformations are reviewable and testable before merge
 
 ### `helm-controller`
 
@@ -810,7 +837,7 @@
       kind: GitRepository
       name: platform-config
     update:
-      path: ./apps/payment-api/overlays/prod
+      path: ./apps/payment-api
     git:
       commit:
         author:
@@ -819,7 +846,7 @@
       push:
         branch: main
   ```
-* marked Deployment in the selected production overlay
+* marked Deployment in the selected application directory
   ```yaml
   apiVersion: apps/v1
   kind: Deployment
@@ -853,13 +880,13 @@
   4. `image-automation-controller` reconciles
      `ImageUpdateAutomation/payment-api-prod`
      * it checks out the branch configured by `GitRepository/platform-config`
-     * it scans `apps/payment-api/overlays/prod`
+     * it scans `apps/payment-api`
      * the marker names `ImagePolicy/payment-api-prod` in namespace `flux-system`
      * it replaces only the marked image field with
        `ghcr.io/company/payment-api:2.4.1`
      * it commits and pushes that file change to `main`
   5. `source-controller` detects the new Git commit
-  6. the Flux `Kustomization` for the production overlay applies the committed
+  6. the Flux `Kustomization` for the application applies the committed
      Deployment image change
 * same-repository CI loop
   * this risk exists when application source and deployment YAML share one Git
@@ -868,49 +895,25 @@
   2. Flux commits the new image tag to a deployment file in the same repository
   3. an unrestricted workflow treats the Flux commit as another application
      change and builds another image
-* GitHub Actions mitigation
-  * restrict the image-build workflow to application and build inputs
-  * example from `.github/workflows/build-image.yaml`
-    ```yaml
-    name: build-image
-    on:
-      push:
-        paths:
-          - "src/**"
-          - "build.gradle"
-          - "Dockerfile"
-    ```
-  * a Flux commit that changes only `apps/**` does not run this workflow
-  * Flux still observes that commit and applies the changed deployment manifest
-
-## SOPS decryption
-
-* purpose
-  * explains the Flux-specific step between receiving an encrypted manifest and
-    applying the decrypted Kubernetes object
-  * the Spring Boot GitOps workshop uses this behavior and lists this workshop as
-    a prerequisite
-* input
-  * Flux receives the encrypted files through the source artifact
-* reconciliation-time process
-  1. `kustomize-controller` reads
-     `Kustomization.spec.decryption.secretRef.name`
-  2. it uses that name to load the Secret from the `Kustomization` namespace
-  3. for age, it reads Secret entries whose names end with `.agekey`
-  4. it decrypts the encrypted values in memory
-     * Flux does not read `.sops.yaml`
-     * `.sops.yaml` supplies encryption rules and public recipients when a file is
-       encrypted locally
-     * the encrypted file already contains the recipient metadata required for
-       decryption
-     * Flux combines that metadata with the private age key from the referenced
-       Secret
-  5. it builds and applies the resulting Kubernetes object
+  * solution: GitHub Actions mitigation
+    * restrict the image-build workflow to application and build inputs
+    * example from `.github/workflows/build-image.yaml`
+      ```yaml
+      name: build-image
+      on:
+        push:
+          paths:
+            - "src/**"
+            - "build.gradle"
+            - "Dockerfile"
+      ```
+    * a Flux commit that changes only `apps/**` does not run this workflow
+    * Flux still observes that commit and applies the changed deployment manifest
 
 ## Flux versus Argo CD
 
-Both systems pull desired state and compare it with Kubernetes. The main
-difference is the operational unit presented to users.
+* both systems pull desired state and compare it with Kubernetes
+    * main difference: operational unit presented to users
 
 | Concern | Flux | Argo CD |
 |---|---|---|

@@ -1,4 +1,0 @@
-creation_rules:
-  - path_regex: ^apps/nginx/overlays/(dev|prod)/secret\.enc\.yaml$
-    encrypted_regex: ^(data|stringData)$
-    age: age16vfwrxq6ms4xc52hddarfzj7t6ajqe6ctpthuvwjwxeh39rds4sqguaw9w

@@ -3,5 +3,4 @@ kind: Kustomization
 
 resources:
   - source.yaml
-  - dev
-  - prod
+  - nginx-sync.yaml
