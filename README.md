@@ -410,16 +410,15 @@
     * `helm-controller` installs or upgrades the release from the downloaded chart
       * no `HelmRepository` or generated `HelmChart` object is required
 * is an alternative distribution path, not an inherent improvement over Git
-* tags are mutable references; a digest identifies exact registry content
 
 #### `Bucket`
 
 * purpose
   * a Flux `Bucket` object tells `source-controller` to download files from an
     object-storage bucket
-  * supported storage includes Amazon S3, Google Cloud Storage, Azure Blob
+  * supported storage: Amazon S3, Google Cloud Storage, Azure Blob
     Storage and S3-compatible systems such as MinIO
-  * the files can contain Kubernetes manifests, Kustomize configuration or a
+  * files can contain Kubernetes manifests, Kustomize configuration or a
     Helm chart
 * example bucket contents
   ```
@@ -432,87 +431,100 @@
       └── README.md
   ```
 * use when configuration is distributed through object storage
-  * example: the cluster can access S3 through cloud workload identity but
-    cannot access Git
+  * example: cluster can authenticate to S3 but not to Git
 * change detection
   1. an external system uploads Kubernetes configuration files to an
      object-storage bucket
-  2. a Flux `Bucket` object tells `source-controller`:
-     * which storage service to access
-     * which bucket to read
-     * how often to check it
-  3. `source-controller` lists the included objects
-     * an object key is its path, such as `manifests/deployment.yaml`
-     * an ETag is an opaque identifier returned for the current representation of
-       one object
-     * example listing
-       ```text
-       manifests/deployment.yaml  ETag "a1b2"
-       manifests/service.yaml     ETag "c3d4"
-       ```
-  4. `source-controller` hashes the ordered key-and-ETag list
-     * the resulting SHA-256 value represents the observed bucket contents
-  5. it compares that value with `Bucket.status.artifact.revision`
-     * equal values: keep the existing artifact; no file download is required
-     * different values: download the included objects and create a new compressed
-       artifact
-  6. it records the new revision, digest and artifact URL in `Bucket.status`
-  7. a Flux `Kustomization` can refer to the `Bucket` object
+  2. Flux `Bucket` object specifies the bucket address, authentication and check interval
+  3. `source-controller` lists the files in the bucket
+     * the storage service returns a name and ETag for each file
+        * example
+          ```text
+          manifests/deployment.yaml  ETag "a1b2"
+          manifests/service.yaml     ETag "c3d4"
+          ```
+     * `source-controller` compares these values with the previous check
+     * a changed file name or ETag means that the bucket contents changed
+  4. `source-controller` creates a revision from the current file names and ETags
+     * example: by hashing the ordered key-and-ETag list
+        * in particular: adding, removing or changing a file changes the revision
+  5. `source-controller` compares the calculated revision with the last revision
+     stored in `Bucket.status`
+     * same revision: the bucket did not change, so the existing artifact remains
+     * different revision: `source-controller` downloads the files and creates a
+       new artifact
+  6. `source-controller` records the new artifact's revision, digest and URL in
+     `Bucket.status`
+  7. a Flux `Kustomization` can use the `Bucket` artifact as its source
+    ```
+    spec:
+        ...
+        sourceRef:
+            kind: Bucket
+            name: company-production-config
+    ```
 
 ### `kustomize-controller`
 
-* watches Flux `Kustomization` objects for creation, specification changes,
-  source artifact changes, retry requests and reconciliation intervals
-* one Flux `Kustomization` defines one set of source files reconciled together
-  * it does not create a Flux `Kustomization` for every applied object
-  * the applied Deployments, Services and other objects keep their own Kubernetes
-    `status`
+* processes Flux `Kustomization` objects
+    * each object tells the controller:
+      * which source artifact to use
+      * which directory to build
+      * how often to reconcile
+      * whether to prune removed objects or wait for readiness
+* reconciliation
+    * runs when:
+      * the `Kustomization` is created or changed
+      * its source produces a new artifact
+      * its interval expires
+      * an immediate reconciliation is requested
+    * processes all objects built from the selected directory as one unit
+      * example: Namespace, Deployment and Service
+      * the Flux `Kustomization` records the overall result
+      * each applied object keeps its own Kubernetes status
 * execution model
-  * `kustomize-controller` uses the Kustomize Go library; it does not start a
-    `kubectl apply -k` process
-  * it builds and validates the selected source path in memory
-  * it applies the resulting objects directly through the Kubernetes API by
-    using server-side apply
-  * `kubectl kustomize <path>` is a local way to inspect the build output; it is
-    not the command executed by Flux
-* workshop example
+  * `kustomize-controller` uses the Kustomize Go library
+  * it reads and builds the selected source path in memory
+    * the build output is a set of Kubernetes objects
+  * it does not run `kubectl apply -k`
+    * it sends the built objects directly to the Kubernetes API server by using Kubernetes Server-Side Apply
+        * the objects are already available in memory
+            * in particular: no temporary YAML files or `kubectl` subprocess are required
+        * the API server validates the objects
+        * the API server creates missing objects and merges changes into existing
+          objects
+  * `kubectl kustomize <path>` is a local command for inspecting the build output
+    * in particular: Flux does not execute this command
+* example
   ```yaml
   apiVersion: kustomize.toolkit.fluxcd.io/v1
   kind: Kustomization
   metadata:
-    name: nginx
+    name: production-apps
     namespace: flux-system
   spec:
-    interval: 1m
-    retryInterval: 20s
-    timeout: 2m
-    path: ./apps/nginx
+    interval: 10m
+    path: ./environments/production/apps # path inside the source artifact
     prune: true
     wait: true
-    sourceRef:
+    sourceRef: # source object in the same namespace
       kind: GitRepository
-      name: gitops-flux-workshop
+      name: platform-config
   ```
-* `metadata.name: nginx` is only a descriptive name for this reconciliation
-  unit
-  * Flux does not derive the source path or target namespace from this name
 * Flux `Kustomization` versus Kustomize `kustomization.yaml`
-  * Flux `Kustomization`
-    * Kubernetes API object watched by `kustomize-controller`
-    * selects a source, path, interval and lifecycle options
-    * is processed continuously after it is stored in the Kubernetes API
-  * Kustomize `kustomization.yaml`
-    * file inside the selected directory
-    * lists resources, generators, patches and transformations
-    * is not stored as a Kubernetes API object
-    * is processed when a Flux `Kustomization` reconciles that directory
-* the complete reconciliation sequence is described in
-  [Workshop flow: Git to Kubernetes](#workshop-flow-git-to-kubernetes)
+    * Flux `Kustomization`
+      * defines continuous reconciliation from a source artifact to a Kubernetes
+        cluster
+      * selects the source directory
+      * configures apply behavior such as interval, pruning and readiness checks
+    * Kustomize `kustomization.yaml`
+      * defines how files in one directory are combined and transformed
+      * lists resources, generators, patches and other Kustomize settings
+      * produces the Kubernetes objects that Flux applies
 * missing `kustomization.yaml`
-  * behavior
-    * Flux generates one in memory from Kubernetes YAML manifests under
-      `spec.path`
-    * the generated file is not written to Git
+  * during reconciliation, `kustomize-controller` checks `spec.path` for a `kustomization.yaml`
+    * if the file is missing, `kustomize-controller` generates a temporary one before
+      running the Kustomize build
     * Flux has no setting that fails reconciliation only because this file is
       absent
   * limitations
@@ -520,33 +532,74 @@
       * adding a YAML manifest under the selected tree can add it to the build
     * non-Kubernetes YAML can fail the build unless source ignore rules exclude
       it
-    * no Kustomize namespace transformation is declared
-      * manifests must declare their namespaces or the Flux `Kustomization` must
-        set `spec.targetNamespace`
-    * patches, generators and other Kustomize transformations cannot be
-      configured for that directory
+    * the generated `kustomization.yaml` only lists discovered manifests as resources
+      * it cannot define Kustomize settings such as `namespace`, patches, generators
+        or image replacements
     * `kubectl kustomize <path>` cannot reproduce the build without a local
       Kustomize file
     * reviewers cannot inspect one explicit list of managed resources
-  * recommendation
-    * automatic generation is acceptable for a small directory containing only
-      Kubernetes manifests
-    * otherwise, commit an explicit `kustomization.yaml` so resource selection
-      and transformations are reviewable and testable before merge
+  * recommendation: commit an explicit `kustomization.yaml` so resource selection and transformations are reviewable and testable before merge
 
 ### `helm-controller`
 
 * terminology
   * Helm chart: versioned package containing templates, default values and
     metadata
-  * Helm release: installed instance of a chart; Helm stores its history in the
-    cluster, normally in Secrets
+  * Helm release
+    * one named installation of a chart in a Kubernetes cluster
+    * each successful install or upgrade creates a release revision
+    * Helm normally stores the revision records as Kubernetes Secrets
+        * the record contains the chart, values, rendered manifests and release status
+            * the Secret contains one field:
+              ```yaml
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: sh.helm.release.v1.web-prod.v3
+                namespace: production
+              type: helm.sh/release.v1
+              data:
+                release: <encoded and compressed Helm release record>
+              ```
+              * after decoding and decompressing `data.release`, the release record contains:
+                * the chart and its template files
+                * the values used for the release
+                * release metadata and status
+                * one rendered manifest string containing all Kubernetes objects
+                    * rendered manifest combines multiple objects as YAML documents
+                      ```yaml
+                      ---
+                      # Source: web/templates/service.yaml
+                      apiVersion: v1
+                      kind: Service
+                      metadata:
+                        name: web
+                      ...
+                      ---
+                      # Source: web/templates/deployment.yaml
+                      apiVersion: apps/v1
+                      kind: Deployment
+                      metadata:
+                        name: web
+                      ...
+                      ```
+        * Helm uses it for upgrades, rollbacks, history and uninstall
+            * Helm needs persistent release state because it has no separate server or database
   * Flux `HelmRelease`: custom Kubernetes API object that declares the desired
     chart, values and Helm action policies
+  * Flux `HelmChart`: custom Kubernetes API object that declares which chart
+    and version `source-controller` must obtain and store as an artifact
+    * when `HelmRelease.spec.chart` is used, `helm-controller` creates the
+      `HelmChart`
+      * OCI alternative
+        * `HelmRelease.spec.chartRef` can refer directly to an `OCIRepository`
+        * the OCI artifact then replaces the intermediate `HelmChart` in this flow
+    * `HelmChart.status.artifact` identifies the chart package produced by
+      `source-controller`
 * responsibility
   * `helm-controller` watches live `HelmRelease` objects
-  * a creation, specification change, chart artifact change, referenced-values
-    change, interval or retry can trigger reconciliation
+      * a creation, specification change, chart artifact change, referenced-values
+        change, interval or retry can trigger reconciliation
   * the controller reads the desired release from the `HelmRelease` and performs
     Helm install, upgrade, test, rollback or uninstall actions
 * example
@@ -560,20 +613,21 @@
     interval: 10m
     chart:
       spec:
-        chart: webapp
-        version: "2.4.1"
+        chart: webapp # chart name in HelmRepository index.yaml
+        version: "2.4.1" # selected chart version
         sourceRef:
           kind: HelmRepository
-          name: company-charts
-    values:
+          name: company-charts # HelmRepository in the same namespace
+    values: # overrides the chart's default value
       replicaCount: 3
+    valuesFrom: # load additional values from Secrets or ConfigMaps
+      - kind: ConfigMap
+        name: web-prod-values # external values in the same namespace
     driftDetection:
-      mode: enabled
+      mode: enabled # detect and correct changes to installed resources
   ```
-  * `spec.values` overrides values defined by the chart
-  * `spec.valuesFrom` can load additional values from Secrets or ConfigMaps
 * example HTTP/S Helm repository reconciliation: upgrade from `2.4.0` to `2.4.1`
-  1. before this reconciliation run:
+  1. state before this reconciliation run:
      * the chart repository already contains `webapp-2.4.1.tgz`
      * its `index.yaml` maps chart `webapp` version `2.4.1` to that package URL
        and digest
@@ -584,9 +638,10 @@
      * Git contains both manifests, and a new commit changes only
        `spec.chart.spec.version` in the `HelmRelease/web-prod` manifest from
        `2.4.0` to `2.4.1`
-  2. the parent Flux `Kustomization` applies the changed `HelmRelease` manifest.
+  2. `kustomize-controller` applies the changed `HelmRelease` manifest
+    * it is included in a directory managed by a Flux `Kustomization`
   3. `source-controller` reconciles `HelmRepository/company-charts` after an
-     object change or its configured interval.
+     object change or its configured interval
      * it downloads `index.yaml`
      * it stores the index as an artifact
      * it writes the artifact URL to `HelmRepository.status.artifact`
@@ -600,36 +655,36 @@
      * it writes the package URL and digest to `HelmChart.status.artifact`
   6. `helm-controller` reads that status, downloads the chart package from the
      internal `source-controller` URL and renders its templates with the values
-     from `HelmRelease/web-prod`.
-  7. it compares the desired chart digest, values and action-relevant
-     `HelmRelease.spec` with the last successful Helm release recorded in the
-     cluster.
-     * no recorded release: run Helm install
-     * different desired input: run Helm upgrade
-     * equal desired input: do not run install or upgrade
-     * in this example, the version and chart digest differ, so it runs Helm
-       upgrade
-  8. on a later reconciliation, the desired input equals the last successful
-     release, so the controller does not run Helm install or upgrade.
-     * with `driftDetection.mode: enabled`, it compares live Kubernetes objects
-       with the manifests recorded by Helm for the current release
-     * the controller sends server-side apply dry-run requests to the Kubernetes
-       API
-     * the API server calculates and returns each object as a real apply would
-       produce it, but does not store the result
-     * the controller compares that result with the live object and produces a
-       JSON Patch summary for detected changes
-     * no reported change means no drift
-     * reported changes are applied to restore the Helm-recorded manifests
+     from `HelmRelease/web-prod`
+  7. `helm-controller` compares the requested chart and values with the Helm release
+     stored in the cluster
+     * no stored release: run Helm install
+     * different chart or values: run Helm upgrade
+     * same chart and values: do not run install or upgrade
+     * in this example: version and chart digest differ, so it runs Helm upgrade
   9. `helm-controller` updates `HelmRelease/web-prod.status` after each
-     reconciliation run.
-* after `HelmChart.status.artifact` is created, the `HelmChart` remains the
-  source object for that package
-  * it is reconciled when its requested chart or source revision changes
-  * `HelmRelease.status.helmChart` identifies it
-* OCI alternative
-  * `HelmRelease.spec.chartRef` can refer directly to an `OCIRepository`
-  * the OCI artifact then replaces the intermediate `HelmChart` in this flow
+     reconciliation run
+* drift detection
+  * detects manual changes to objects created by a Helm release
+  * requires `HelmRelease.spec.driftDetection.mode: enabled`
+    * if the field is omitted, drift detection is disabled
+  * during a later reconciliation, when no install or upgrade is required:
+    1. `helm-controller` reads the rendered manifests from the current Helm
+       release revision
+    2. it parses each manifest into a desired Kubernetes object
+    3. `helm-controller` reads the corresponding live object from the Kubernetes API
+    4. it sends the stored manifest to the API server as a Server-Side Apply request
+       with `dryRun=All`
+       * the API server calculates the object that would result from the apply
+       * the API server returns that calculated object without storing it
+    5. `helm-controller` compares:
+       * the live object read in step 3
+       * the calculated object returned in step 4
+    6. if the objects differ, drift exists
+       * `helm-controller` corrects the changed objects directly with Server-Side
+         Apply
+       * it does not run Helm upgrade because the chart, values and stored Helm
+         release did not change
 
 ### `notification-controller`
 
