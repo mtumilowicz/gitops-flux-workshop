@@ -1007,50 +1007,56 @@
           * Kubernetes RBAC for those credentials provides the final authorization at
               the target cluster
 
-### Resource organization
+### Deployment dependencies
 
-* Flux example
-  ```yaml
-  apiVersion: kustomize.toolkit.fluxcd.io/v1
-  kind: Kustomization
-  metadata:
-    name: applications
-    namespace: flux-system
-  spec:
-    interval: 5m
-    path: ./applications
-    prune: true
-    sourceRef:
-      kind: GitRepository
-      name: platform-config
-    dependsOn:
-      - name: infrastructure
-  ```
-  * `Kustomization/infrastructure` and `Kustomization/applications` have separate
-    status, retry and source-path configuration
-  * `dependsOn` prevents application reconciliation until infrastructure reports
-    ready
-  * this dependency graph is a direct Flux feature
-* Argo CD example
-  * infrastructure and workloads can each be managed by an `Application`
-  * every resource managed by Argo CD must belong to an Application resource tree
-  * ordering inside an Application can use sync phases and waves
-  * coordination across separate Applications requires an additional composition
-    pattern, such as app-of-apps
+* general
+  * Flux
+    * dependencies are defined between Flux `Kustomization` objects
+    * `spec.dependsOn` identifies the required `Kustomization` objects
+    * Flux waits until every dependency reports `Ready`
+  * Argo CD
+    * resources in one `Application` can be ordered with sync waves
+    * Argo CD applies earlier waves before later waves
+    * separate `Application` objects normally reconcile independently
+    * Argo CD has no direct `Application.spec.dependsOn` equivalent
+
+* example: deploy workloads after shared infrastructure
+  * Flux
+    * `Kustomization/infrastructure` applies the infrastructure
+    * `Kustomization/applications` applies the workloads
+    * the workload `Kustomization` declares:
+      ```yaml
+      spec:
+        dependsOn:
+          - name: infrastructure
+      ```
+    * Flux waits for `Kustomization/infrastructure` to report `Ready`
+  * Argo CD
+    * place the infrastructure and workloads in one `Application`
+    * assign infrastructure resources to an earlier sync wave:
+      ```yaml
+      metadata:
+        annotations:
+          argocd.argoproj.io/sync-wave: "-1"
+      ```
+    * workloads use the default wave `0`
+    * Argo CD applies the infrastructure wave first and waits for it to become
+      healthy before applying the workload wave
 
 ### Deployment approval
 
 * Flux normally treats an accepted Git commit as approved desired state
   * source detection triggers reconciliation without a second deployment approval
-  * suspending a Kustomization stops all reconciliation; Flux does not create a
-    native pending deployment with an approve button
+  * `Kustomization.spec.suspend: true` pauses future reconciliation
+    * Flux does not create a native pending deployment with an approve button
+    * => suspension is not an approval workflow
 * Argo CD can separate detection from deployment
   * the Application controller calculates the difference after merge
   * with automated sync disabled, the Application remains unsynchronized until a
     user or API client starts synchronization
-  * this is useful when deployment authorization is separate from code approval,
-    or when production changes must wait for a maintenance window or coordinated
-    release
+  * this is useful when 
+    * deployment authorization is separate from code approval
+    * production changes must wait for a maintenance window or coordinated release
   * the trade-off is that merged Git state does not mean deployed state
 * Argo CD can also behave automatically
   ```yaml
@@ -1067,8 +1073,7 @@
 * fleet: the set of clusters and applications operated by one platform team
 * per-cluster Flux
   * each cluster runs its own controllers and uses in-cluster Kubernetes identity
-  * loss of Flux in one cluster stops reconciliation there but does not stop other
-    clusters
+  * if Flux stops working in one cluster, other clusters continue to reconcile
   * a consolidated fleet list or dashboard requires another aggregation system
 * centralized Argo CD
   * the Argo CD control plane runs as Pods in a management cluster
@@ -1097,8 +1102,11 @@
 ## Workshop flow: Git to Kubernetes
 
 1. `kubectl apply -k flux-setup` creates the initial `GitRepository` and Flux
-   `Kustomization` objects in the Kubernetes API.
-2. `GitRepository/gitops-flux-workshop` in namespace `flux-system` specifies:
+   `Kustomization` objects in the Kubernetes API
+   * both objects use the `flux-system` namespace
+     * `flux-system` is the default namespace used by Flux installations for Flux
+       controllers and bootstrap configuration
+2. `GitRepository/gitops-flux-workshop` specifies:
    * repository URL
    * `main` branch
    * one-minute check interval
