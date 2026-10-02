@@ -688,14 +688,17 @@
 
 ### `notification-controller`
 
-* handles two independent directions
-  * inbound: accept an authenticated webhook and request early reconciliation
-  * outbound: forward selected Flux reconciliation results to an external system
-* `Receiver`, `Provider` and `Alert` are Flux custom resources, not built-in
-  Kubernetes kinds
-* `notification-controller` watches these objects for creation and specification
-  changes
-* it does not fetch Git, render manifests or apply workloads
+* provides two separate functions
+  * incoming webhooks
+    * a `Receiver` accepts a webhook from a Git provider, registry or another
+      external system
+    * after validating the request, it asks the configured Flux source objects
+      to reconcile immediately instead of waiting for their next interval
+  * outgoing notifications
+    * an `Alert` selects Events reported by Flux controllers
+    * a `Provider` sends the selected Events to an external system such as
+      Slack, Microsoft Teams or another webhook endpoint
+  * in particular: it does not fetch Git, render manifests or apply workloads
 
 #### `Receiver`: inbound webhook
 
@@ -703,7 +706,7 @@
   * reduce the delay between an external change and the next source check
   * example: a GitHub push requests immediate reconciliation of a
     `GitRepository` instead of waiting for its interval
-* polling remains the fallback when delivery fails
+* polling remains the fallback when webhook delivery fails
 * example
   ```yaml
   apiVersion: notification.toolkit.fluxcd.io/v1
@@ -715,48 +718,70 @@
     type: github
     events:
       - push
-    secretRef:
+    secretRef: # identifies a Kubernetes Secret in the Receiver namespace
       name: github-webhook-token
     resources:
       - apiVersion: source.toolkit.fluxcd.io/v1
         kind: GitRepository
         name: platform-config
   ```
-* after reconciliation, `Receiver.status.webhookPath` contains the generated URL
-  path
-  * expose `notification-controller` through the cluster's ingress or load
-    balancer
-  * configure GitHub to send webhook requests to that external host and path
-* `secretRef` identifies a Kubernetes Secret in the Receiver namespace
-  * the Secret must contain a `token` entry
-  * the same random token is configured as the GitHub webhook secret
-  * if the Secret manifest uses `stringData`, the token is plain text in that
-    manifest
-  * base64 encoding in `data` is not encryption
-  * do not commit the token unencrypted; use SOPS or an external secret system
-  * Kubernetes storage encryption depends on cluster configuration
+* after the `Receiver` becomes ready, `Receiver.status.webhookPath` contains its
+  generated path
+  * example: `/hook/bed6d00b...`
+  * the path identifies this specific `Receiver`
+* expose the `webhook-receiver` Kubernetes Service through an Ingress,
+  HTTPRoute or external load balancer
+  * example external host: `https://flux-webhook.example.com`
+    * combine the external host with `status.webhookPath`
+      * example payload URL:
+        `https://flux-webhook.example.com/hook/bed6d00b...`
+* configure the shared webhook token
+  1. generate a random token
+  2. store the token under the `token` key in a Kubernetes Secret
+  3. set `Receiver.spec.secretRef.name` to the name of that Secret
+     * the `Receiver` and Secret must be in the same namespace
+  4. enter the same token in GitHub's **Webhook secret** field
 * HMAC verification
   * HMAC is a keyed message-authentication code
   * it proves that the sender knew the shared token and that the request body was
     not changed
   * it does not encrypt the request body
   1. GitHub calculates an HMAC-SHA256 value from the request body and shared token
+    * result proves two things:
+      * sender knows the secret key
+      * request body was not changed after signing
   2. GitHub sends the value in `X-Hub-Signature-256`
   3. `notification-controller` calculates the expected value with the Secret token
-  4. matching values permit event filtering and reconciliation; different values
-     reject the request
+  4. `notification-controller` compares the received signature with its calculated
+     signature
+     * if the signatures differ, it rejects the request
+     * if the signatures match, it accepts the request as authentic
+  5. `notification-controller` checks the GitHub event type against
+     `Receiver.spec.events`
+     * a matching event triggers reconciliation of the objects listed in
+       `Receiver.spec.resources`
+     * a non-matching event does not trigger reconciliation
 
 #### `Provider` and `Alert`: outbound notification
 
 * purpose
-  * notify operators about selected results such as failed production
-    reconciliation or a newly applied revision
-* `Provider` defines one destination and its authentication
-* `Alert` selects Flux objects and minimum event severity, then refers to a
-  `Provider`
-* Flux controllers attach `info` or `error` severity to notification events
-  * this is Flux event metadata
-  * it is distinct from the Kubernetes Event `Normal` or `Warning` type
+  * send selected Events from Flux controllers to an external notification
+    system
+  * examples:
+    * a production reconciliation failed
+    * a new revision was applied successfully
+* `Provider` declares the external system that receives notifications
+  * `spec.type` selects the provider type, such as Slack or Microsoft Teams
+  * `spec.address` identifies the destination endpoint when required
+  * `spec.secretRef` identifies the Kubernetes Secret containing credentials
+    when required
+* `Alert` defines which controller Events are sent
+  * `spec.eventSources` selects the Flux objects whose Events are considered
+  * `spec.eventSeverity` selects the minimum severity to send
+      * Flux controllers attach `info` or `error` severity to notification events
+        * this is Flux event metadata
+        * it is distinct from the Kubernetes Event `Normal` or `Warning` type
+  * `spec.providerRef` identifies the `Provider` used to deliver them
 * example: send error events from one production reconciliation to Slack
 
   ```yaml
@@ -766,10 +791,10 @@
     name: operations-slack
     namespace: flux-system
   spec:
-    type: slack
-    address: https://slack.com/api/chat.postMessage
-    channel: operations
-    secretRef:
+    type: slack # use the Slack notification integration
+    address: https://slack.com/api/chat.postMessage # Slack API endpoint
+    channel: operations # destination Slack channel
+    secretRef: # Secret containing the Slack authentication token
       name: slack-bot-token
   ---
   apiVersion: notification.toolkit.fluxcd.io/v1beta3
@@ -778,25 +803,43 @@
     name: production-errors
     namespace: flux-system
   spec:
-    providerRef:
+    providerRef: # Provider used to send matching Events
       name: operations-slack
-    eventSeverity: error
+    eventSeverity: error # send only error-level Events
     eventSources:
       - kind: Kustomization
-        name: web-prod
+        name: web-prod # observe Events from this Flux Kustomization
   ```
-* `slack-bot-token` normally contains a Slack bearer token used to authenticate
-  the Slack API request
-  * this Slack integration does not use the GitHub webhook HMAC token
-  * HMAC is used only by provider types that explicitly support signed webhooks,
-    such as `generic-hmac`
+* authentication depends on the external API
+  * GitHub signs each webhook request with the shared webhook token
+    * `notification-controller` recalculates the HMAC signature and verifies it
+  * Slack requires an API bearer token
+    * `notification-controller` reads the token from `Provider.spec.secretRef`
+    * it includes the token in the Slack API request
+  * these tokens are unrelated and must be stored in separate Secrets
 
 ### Image controllers
 
 * optional components
-  * `image-reflector-controller` discovers image tags and evaluates selection
-    policy
-  * `image-automation-controller` writes the selected image reference to Git
+  * `image-reflector-controller` scans a container registry and selects an image
+    according to an `ImagePolicy`
+    * writes the result to `ImagePolicy.status.latestRef`
+  * `image-automation-controller` writes the selected image reference to marked
+    fields in YAML files in Git
+    * flow
+        1. scans YAML files under `ImageUpdateAutomation.spec.update.path`
+        1. finds the $imagepolicy markers
+        1. reads the selected image from each referenced ImagePolicy
+        1. replaces the marked YAML value
+        1. commits and pushes the change
+    * in particular: file does not need to be a Kubernetes Deployment
+        * example
+            ```
+            apps:
+              app1: ghcr.io/company/app1:1.2.0 # {"$imagepolicy": "flux-system:app1-prod"}
+              app2: ghcr.io/company/app2:3.4.0 # {"$imagepolicy": "flux-system:app2-prod"}
+              app3: ghcr.io/company/app3:1.5.0 # {"$imagepolicy": "flux-system:app3-prod"}
+            ```
 * use these components when CI publishes container images but another automated
   process must update the deployment repository
   * do not use them when CI or a release process already makes the required Git
@@ -809,7 +852,7 @@
     name: payment-api
     namespace: flux-system
   spec:
-    image: ghcr.io/company/payment-api
+    image: ghcr.io/company/payment-api # container image repository to scan
     interval: 5m
   ---
   apiVersion: image.toolkit.fluxcd.io/v1
@@ -819,10 +862,10 @@
     namespace: flux-system
   spec:
     imageRepositoryRef:
-      name: payment-api
+      name: payment-api # use tags found by ImageRepository/payment-api
     policy:
       semver:
-        range: ">=2.0.0 <3.0.0"
+        range: ">=2.0.0 <3.0.0" # select the highest matching 2.x version
   ---
   apiVersion: image.toolkit.fluxcd.io/v1
   kind: ImageUpdateAutomation
@@ -833,12 +876,12 @@
     interval: 5m
     sourceRef:
       kind: GitRepository
-      name: platform-config
+      name: platform-config # Git repository containing the manifests
     update:
-      path: ./apps/payment-api
+      path: ./apps/payment-api # update marked fields under this directory
     git:
       commit:
-        author:
+        author: # author recorded on automated commits
           name: flux
           email: flux@example.com
       push:
@@ -864,28 +907,6 @@
           - name: payment-api
             image: ghcr.io/company/payment-api:2.4.0 # {"$imagepolicy": "flux-system:payment-api-prod"}
   ```
-* complete flow
-  1. application CI builds an image and pushes tags to the GHCR repository
-     `ghcr.io/company/payment-api`
-  2. at each `ImageRepository.spec.interval`, `image-reflector-controller`
-     queries that registry repository and stores the discovered metadata in its
-     local cache and Kubernetes status fields
-  3. it evaluates `ImagePolicy/payment-api-prod`
-     * for tags `2.4.0`, `2.4.1`, `2.5.0-rc.1` and `3.0.0`, the example semantic
-       version policy selects stable tag `2.4.1`
-     * it writes the selected reference to `ImagePolicy.status.latestRef`
-     * it does not change Git or the running Deployment
-  4. `image-automation-controller` reconciles
-     `ImageUpdateAutomation/payment-api-prod`
-     * it checks out the branch configured by `GitRepository/platform-config`
-     * it scans `apps/payment-api`
-     * the marker names `ImagePolicy/payment-api-prod` in namespace `flux-system`
-     * it replaces only the marked image field with
-       `ghcr.io/company/payment-api:2.4.1`
-     * it commits and pushes that file change to `main`
-  5. `source-controller` detects the new Git commit
-  6. the Flux `Kustomization` for the application applies the committed
-     Deployment image change
 * same-repository CI loop
   * this risk exists when application source and deployment YAML share one Git
     repository
@@ -911,17 +932,80 @@
 ## Flux versus Argo CD
 
 * both systems pull desired state and compare it with Kubernetes
-    * main difference: operational unit presented to users
-
-| Concern | Flux | Argo CD |
-|---|---|---|
-| Primary unit | A Flux `Kustomization` reconciles one source path. A repository can use several independent Kustomizations. | An `Application` identifies a source, path and destination. Argo CD reports and operates that resource tree as one application. |
-| Apply timing | A new observed source revision is reconciled automatically unless the Kustomization is suspended. | Without automated sync, Argo CD detects a difference but waits for a user or API request to synchronize it. |
-| Drift correction | Periodic Kustomization reconciliation restores managed fields. | Automatic self-healing must be enabled when live drift should trigger synchronization. |
-| Pruning | `Kustomization.spec.prune: true`. | `Application.spec.syncPolicy.automated.prune: true` for automatic pruning; manual synchronization can also prune. |
-| Normal topology | Install Flux controllers in each target cluster. | Install Argo CD in a management cluster and register target clusters, or manage the installation cluster itself. |
-| User interface | Kubernetes API, Flux CLI, events and logs. | Application API, CLI and web interface with diffs, resource tree, health and sync history. |
-| Authorization | Kubernetes RBAC and the ServiceAccount used by a reconciliation. | Argo CD RBAC and `AppProject` restrictions for sources, destinations and resource kinds. |
+* management model
+  * Flux is controller-oriented
+    * users combine several Kubernetes objects to define the delivery flow
+    * `GitRepository` obtains files, `Kustomization` applies manifests and
+      `HelmRelease` manages a Helm release
+    * each object has its own reconciliation interval, status and dependencies
+    * Flux does not require one top-level object representing the complete
+      application
+  * Argo CD is application-oriented
+    * an `Application` connects source configuration with a target cluster and
+      namespace
+    * Argo CD presents the managed resources, health, differences and sync status
+      under that `Application`
+    * users normally synchronize and troubleshoot the deployment through the
+      `Application`
+  * Flux can still use one `Kustomization` per application
+    * this grouping is optional
+    * Argo CD uses `Application` as its primary user-facing model
+* applying new revisions
+  * Flux automatically applies a new source revision unless reconciliation is
+    suspended
+  * Argo CD can apply revisions automatically
+    * without automated synchronization, it reports the difference and waits
+      for a user or API request
+* correcting manual changes
+  * a Flux `Kustomization` corrects changes during periodic reconciliation
+  * a Flux `HelmRelease` corrects changes when drift detection is enabled
+  * Argo CD corrects changes automatically when self-healing is enabled
+* deleting resources removed from the desired state
+  * Flux requires `Kustomization.spec.prune: true`
+  * Argo CD automated pruning requires
+    `Application.spec.syncPolicy.automated.prune: true`
+  * an Argo CD manual synchronization can also request pruning
+* installation topology
+  * Flux controllers are normally installed in each managed cluster
+  * Argo CD is often installed in one management cluster that manages other
+    registered clusters
+  * Argo CD can also manage its installation cluster
+* user interface
+  * Flux uses Kubernetes objects, the Flux CLI, Events and controller logs
+  * Argo CD provides an API, CLI and web interface with resource trees, diffs,
+    health and synchronization history
+* authorization
+    * Flux
+        * Git repository permissions determine who can make persistent changes to the
+          desired Flux configuration
+        * Kubernetes RBAC controls
+            * who can change live Flux objects directly
+                * if an object is managed from Git, Flux later restores the version stored
+                  in Git
+                * if an object is not managed from Git, the direct change remains
+            * what Flux controllers can change
+                1. `Kustomization.spec.serviceAccountName` and
+                        `HelmRelease.spec.serviceAccountName` select a Kubernetes ServiceAccount
+                1. controller uses Kubernetes impersonation to act as that ServiceAccount
+                    during reconciliation
+    * Argo CD
+        * Argo CD RBAC controls who can view, create, change, synchronize or delete
+            Argo CD applications
+        * `AppProject` defines what applications in that project are allowed to
+          deploy
+          * in particular
+            * which repositories they may read configuration from
+            * which clusters and namespaces they may deploy to
+            * which Kubernetes resource types they may create
+          * every Argo CD `Application` belongs to an `AppProject`
+          * example: the `payments` project can allow its applications to:
+            * read configuration from `company/payments-config`
+            * deploy to the `payments` namespace
+            * create only `Deployment`, `Service` and `ConfigMap` objects
+        * the Argo CD application controller applies resources with credentials for
+          the target cluster
+          * Kubernetes RBAC for those credentials provides the final authorization at
+              the target cluster
 
 ### Resource organization
 
