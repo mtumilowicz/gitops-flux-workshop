@@ -1112,8 +1112,8 @@
    * one-minute check interval
 3. `source-controller` checks the repository
    * `branch: main` is a selection rule whose result can change
-   * for each check, the controller resolves that rule to the exact commit
-     currently referenced by `main`
+     * controller resolves that rule to the exact commit
+       currently referenced by `main`
 4. `source-controller` downloads that commit to temporary storage and creates a
    compressed artifact from the included files
    * the artifact contains the included repository files
@@ -1159,14 +1159,16 @@
      become ready
 11. because `spec.wait: true`, `kustomize-controller` checks the health of all
     reconciled objects until they are ready or `spec.timeout` expires.
-    * ready means that Flux's health check for that object reports success; for a
-      Deployment, the rollout must become available
+    * ready means that Flux's health check for that object reports success
     * if `spec.wait` is omitted or `false`, the controller does not wait for all
       applied objects to become healthy before it completes the reconciliation
     * `false` is the default
 12. `kustomize-controller` records the applied revision, managed-object inventory
     and conditions in `Kustomization/nginx.status`.
-13. the controller deletes its extracted temporary files.
+13. `kustomize-controller` deletes its temporary downloaded and extracted copy
+    of the source artifact
+    * the artifact stored by `source-controller` remains available
+    * no Kubernetes objects are deleted by this cleanup
 14. source changes, API watch events, intervals, retries and manual requests
     trigger later reconciliations
 
@@ -1186,8 +1188,10 @@ flux get all -A --status-selector ready=false
   * lists all supported Flux custom resources and their current readiness summary
 * `--status-selector ready=false`
   * filters that list to objects whose `Ready` condition is `False`
-  * examples include a `GitRepository` that cannot fetch Git, a `Kustomization`
-    that cannot apply manifests and a `HelmRelease` whose install failed
+  * example
+    * `GitRepository` that cannot fetch Git
+    * `Kustomization` that cannot apply manifests
+    * `HelmRelease` whose install failed
 
 ### Inspection commands
 
@@ -1206,10 +1210,15 @@ flux logs --kind=<kind> --name=<name> \
 flux tree kustomization <name> -n <namespace>
 ```
 
-* `flux tree kustomization` prints the object references recorded in the Flux
-  Kustomization's `.status.inventory`
-  * these are final objects that the Kustomize build produced and Flux applied
-    successfully
+* `flux tree kustomization` shows the objects recorded in the
+  `Kustomization.status.inventory`
+  * use it to confirm that an expected manifest was included in the build and
+    applied
+  * if an object is missing, check `spec.path`, `kustomization.yaml` and build
+    errors
+  * if an object is listed, inspect that live object, its status and its Events
+  * the inventory also shows which objects Flux can delete when pruning is
+    enabled
 * log retention depends on the cluster logging configuration
   * `--since=10m` cannot return logs that were already rotated or lost
 
@@ -1315,5 +1324,3 @@ flux tree kustomization <name> -n <namespace>
      * if a parent Flux `Kustomization` manages the manifest, it can recreate the
        `HelmRelease` later
      * recreation does not prevent the intervening uninstall and reinstall cycle
-
-* [Flux troubleshooting cheatsheet](https://fluxcd.io/flux/cheatsheets/troubleshooting/)
